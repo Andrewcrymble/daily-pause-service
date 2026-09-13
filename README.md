@@ -117,3 +117,13 @@ This service does not write anything. The morning session writes the three posts
 any scripture against a real source that same session, renders the cards, and POSTs the day
 here. Anything it was unsure of arrives with `hold: true` — stored, visible, and sent
 nowhere.
+
+
+## Notes on this deployment
+
+The repo is flat - GitHub's web uploader took the contents of src/ and test/ rather than the
+folders - so Railway runs a custom start command, `node index.js`, rather than the npm start
+script in package.json. Worth tidying one day.
+
+Auto-deploy is on: a push to main builds and deploys. Railway's Redeploy button rebuilds the
+same source snapshot and will not pick up a new commit.
