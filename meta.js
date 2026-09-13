@@ -142,7 +142,7 @@ export async function publishInstagram({ imageUrl, caption, igUserId = config.ig
 
   // Instagram's error when it cannot fetch the file is uselessly vague, so
   // establish reachability here where the message is readable.
-  const get = await fetch(imageUrl, { method: 'HEAD' });
+  const head = await fetch(imageUrl, { method: 'GET' });
   if (!head.ok) {
     throw new GraphError(`Card is not publicly reachable (${head.status})`, imageUrl);
   }
