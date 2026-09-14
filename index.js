@@ -16,7 +16,7 @@ import { config, cardsDir, ensureDirs, configProblems } from './config.js';
 import { zonedToUtc, todayIn, isDateString } from './time.js';
 import { readDay, writeDay, listDays, updatePost } from './store.js';
 import { scheduleFacebook, publishInstagram, publishFacebookNow, verifyFacebook,
-         cardUrl } from './publisher.js';
+         cardUrl, cardFile } from './publisher.js';
 import { check as dayCheck, pulse as dayPulse } from './check.js';
 import * as notify from './notify.js';
 import { overview as statsOverview } from './insights.js';
@@ -68,6 +68,40 @@ function readBody(req) {
 }
 
 /* ------------------------------------------------------------ accepting -- */
+
+// The shapes a card can be drawn in. The square is the one Facebook and
+// Instagram are posted from directly; the rest exist so one idea can be a feed
+// post, a story and a pin without being written twice.
+const CARD_FORMATS = ['square', 'portrait', 'story', 'pin'];
+
+/**
+ * Write every shape supplied for one slot and describe them.
+ * `imageBase64` is the square and is required; `images` carries the rest.
+ */
+function writeCards(date, slot, imageBase64, images = {}) {
+  const warnings = [];
+  const formats = {};
+
+  const all = { square: imageBase64, ...images };
+  for (const [format, data] of Object.entries(all)) {
+    if (data === undefined || data === null || data === '') continue;
+    if (!CARD_FORMATS.includes(format)) bad(`${slot}: unknown card shape ${format}`);
+
+    const { buf, type } = decodeCard(data);
+    if (buf.length < 1024) {
+      bad(`${slot}: the ${format} card is missing or implausibly small`);
+    }
+    if (type && type !== 'image/jpeg') {
+      warnings.push(`${slot}: the ${format} card is ${type}; Instagram wants JPEG`);
+    }
+    const file = cardFile(date, slot, format);
+    writeFileSync(join(cardsDir, file), buf);
+    formats[format] = { file, bytes: buf.length, url: cardUrl(date, slot, format) };
+  }
+
+  if (!formats.square) bad(`${slot}: the square card is required`);
+  return { formats, warnings };
+}
 
 function decodeCard(imageBase64) {
   const m = /^data:(image\/[a-z+]+);base64,/.exec(imageBase64 || '');
@@ -129,13 +163,8 @@ async function acceptDay(body) {
     if (!config.slots[slot]) bad(`Unknown slot ${slot}`);
     if (!p.caption || !String(p.caption).trim()) bad(`${slot}: caption is required`);
 
-    const { buf, type } = decodeCard(p.imageBase64);
-    if (buf.length < 1024) bad(`${slot}: card image is missing or implausibly small`);
-    if (type && type !== 'image/jpeg') {
-      // Instagram is fussy about what it will fetch. Take it, but say so.
-      warnings.push(`${slot}: card is ${type}; Instagram wants JPEG`);
-    }
-    writeFileSync(join(cardsDir, `${date}-${slot}.jpg`), buf);
+    const written = writeCards(date, slot, p.imageBase64, p.images);
+    warnings.push(...written.warnings);
 
     const [hh, mm] = config.slots[slot];
     const at = zonedToUtc(date, hh, mm, config.timezone);
@@ -151,7 +180,14 @@ async function acceptDay(body) {
       cardReference: p.reference ?? null,
       hold: Boolean(p.hold),
       holdReason: p.holdReason ?? null,
-      card: { file: `${date}-${slot}.jpg`, bytes: buf.length, url: cardUrl(date, slot) },
+      // `url` stays the square so everything written before shapes existed
+      // still reads correctly; `formats` is where the rest live.
+      card: {
+        file: written.formats.square.file,
+        bytes: written.formats.square.bytes,
+        url: written.formats.square.url,
+        formats: written.formats,
+      },
       facebook: { dueAt: at.toISOString(), status: p.hold ? 'held' : 'pending' },
       instagram: p.instagram === false ? null
         : { dueAt: igAt.toISOString(), status: p.hold ? 'held' : 'queued', attempts: 0 },
@@ -364,10 +400,6 @@ async function route(req, res, url) {
     // rebuilds rather than editing.
     if (action === 'card') {
       const body = await readBody(req);
-      const { buf, type } = decodeCard(body.imageBase64);
-      if (buf.length < 1024) bad('card image is missing or implausibly small');
-      const warnings = [];
-      if (type && type !== 'image/jpeg') warnings.push(`card is ${type}; Instagram wants JPEG`);
 
       if (post.instagram?.status === 'published') {
         return send(res, 409, { error: 'that post is already on Instagram' });
@@ -376,9 +408,16 @@ async function route(req, res, url) {
         return send(res, 409, { error: 'that post has already gone out on Facebook' });
       }
 
-      writeFileSync(join(cardsDir, `${date}-${slot}.jpg`), buf);
+      const written = writeCards(date, slot, body.imageBase64, body.images);
+      const warnings = [...written.warnings];
       updatePost(date, slot, (p) => {
-        p.card = { file: `${date}-${slot}.jpg`, bytes: buf.length, url: cardUrl(date, slot) };
+        p.card = {
+          file: written.formats.square.file,
+          bytes: written.formats.square.bytes,
+          url: written.formats.square.url,
+          // Shapes not resupplied keep whatever was there.
+          formats: { ...(p.card?.formats ?? {}), ...written.formats },
+        };
         if (body.text !== undefined) p.cardText = String(body.text);
         if (body.reference !== undefined) p.cardReference = body.reference || null;
       });

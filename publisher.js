@@ -27,8 +27,21 @@ async function tell(date, slot, on, text) {
   return notify.say(text);
 }
 
-export function cardUrl(day, slot) {
-  return `${config.baseUrl}/cards/${day}-${slot}.jpg`;
+/**
+ * The public address of a card. Instagram fetches this itself, and so will
+ * anything that schedules on our behalf, so it has to be a real URL from the
+ * internet rather than a path on disk.
+ *
+ * The square keeps its original name. Every other shape is suffixed, so a day
+ * written before shapes existed still resolves.
+ */
+export function cardUrl(day, slot, format = 'square') {
+  const name = format === 'square' ? `${day}-${slot}` : `${day}-${slot}-${format}`;
+  return `${config.baseUrl}/cards/${name}.jpg`;
+}
+
+export function cardFile(day, slot, format = 'square') {
+  return format === 'square' ? `${day}-${slot}.jpg` : `${day}-${slot}-${format}.jpg`;
 }
 
 /* ------------------------------------------------------- facebook ------- */
