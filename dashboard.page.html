@@ -395,7 +395,7 @@ function addDays(ymdStr, n) {
 var CHIP_TONE = {
   scheduled: 'good', published: 'good', queued: '', pending: '',
   held: 'warn', cancelled: 'warn', too_late: 'bad', failed: 'bad',
-  missed: 'bad', publishing: ''
+  failed_to_publish: 'bad', failed_final: 'bad', missed: 'bad', publishing: ''
 };
 function chip(label, status) {
   var tone = CHIP_TONE[status] !== undefined ? CHIP_TONE[status] : '';
@@ -445,10 +445,34 @@ function loadStats(refresh) {
 
 /* ================================================================== views */
 
+/** A one-line verdict on the day in view: what went out, what did not. */
+function dayTally() {
+  if (!state.day) return null;
+  var out = { live: 0, waiting: 0, held: 0, broken: [] };
+  state.day.posts.forEach(function (p) {
+    var fb = p.facebook || {};
+    if (p.hold) { out.held++; return; }
+    if (fb.status === 'published') out.live++;
+    else if (['failed', 'failed_to_publish', 'too_late', 'missed'].indexOf(fb.status) !== -1) {
+      out.broken.push(p.slot);
+    } else out.waiting++;
+    var ig = p.instagram;
+    if (ig && ['failed', 'failed_final', 'missed'].indexOf(ig.status) !== -1) {
+      out.broken.push(p.slot + ' (Instagram)');
+    }
+  });
+  return out;
+}
+
 function renderHealth() {
   var s = state.status;
   if (!s) { $('health').innerHTML = ''; return; }
-  var problems = s.problems || [];
+  var problems = (s.problems || []).slice();
+  var t = dayTally();
+  if (t && t.broken.length) {
+    problems.unshift('Did not go out: ' + t.broken.join(', ') +
+      ' — open it below and put it up now, or let it go');
+  }
   var cls = problems.length ? 'bad' : 'ok';
   var html = '<div class="banner ' + cls + '">';
   if (problems.length) {
@@ -458,7 +482,10 @@ function renderHealth() {
     html += '</ul>';
   } else {
     html += '<strong>Everything is in order.</strong>' +
-            '<span class="quiet">Scheduling to ' + esc(s.timezone) +
+            '<span class="quiet">' +
+            (t ? t.live + ' of ' + (t.live + t.waiting + t.held + t.broken.length) +
+                 ' out' + (t.held ? ', ' + t.held + ' held' : '') + ' · ' : '') +
+            'Scheduling to ' + esc(s.timezone) +
             (s.dryRun ? ' · dry run, nothing reaches Meta' : '') +
             ' · Instagram trails Facebook by ' + s.igDelayMinutes + ' min</span>';
   }
@@ -489,6 +516,10 @@ function postCard(post, date) {
   if (ig && ig.error) errs.push('Instagram: ' + ig.error);
 
   var canEdit = fb.status !== 'published' && !(ig && ig.status === 'published');
+  var fbBroken = ['failed', 'failed_to_publish', 'too_late', 'missed'].indexOf(fb.status) !== -1;
+  if (fb.status === 'failed_to_publish') {
+    errs.unshift('Meta did not publish this at its slot. Put it up now, or let it go.');
+  }
 
   return '<div class="' + cls + '" data-slot="' + post.slot + '">' +
     '<div class="slotline">' +
@@ -517,9 +548,15 @@ function postCard(post, date) {
       (ig && ig.status !== 'published'
         ? '<button class="small danger" data-act="cancel" data-slot="' + post.slot +
           '">Cancel Instagram</button>' : '') +
+      (fbBroken
+        ? '<button class="small primary" data-act="facebook-now" data-slot="' + post.slot +
+          '">Put on Facebook now</button>' : '') +
       (canEdit && (fb.status === 'failed' || fb.status === 'pending' || fb.status === 'too_late')
         ? '<button class="small" data-act="reschedule" data-slot="' + post.slot +
-          '">Try Facebook again</button>' : '') +
+          '">Reschedule Facebook</button>' : '') +
+      (fb.postId && fb.status === 'scheduled'
+        ? '<button class="small" data-act="verify" data-slot="' + post.slot +
+          '">Check with Meta</button>' : '') +
     '</div>' +
   '</div>';
 }
@@ -569,6 +606,8 @@ function doAction(act, slot, btn) {
   if (act === 'cancel' && !confirm('Cancel the Instagram post for ' + slot + '?')) return;
   if (act === 'publish-now' && !confirm('Put the ' + slot + ' card on Instagram now? ' +
       'Instagram posts cannot be unsent.')) return;
+  if (act === 'facebook-now' && !confirm('Put the ' + slot + ' card on Facebook now, ' +
+      'rather than at its slot?')) return;
 
   btn.disabled = true;
   var panel = $('panel-today'); panel.classList.add('busy');
@@ -576,6 +615,10 @@ function doAction(act, slot, btn) {
     .then(function (r) {
       toast(act === 'caption' ? 'Caption saved · ' + (r.facebook || '')
            : act === 'publish-now' ? 'On Instagram.'
+           : act === 'facebook-now' ? 'On Facebook.'
+           : act === 'verify' ? (r.state && r.state.published ? 'Meta confirms it is live.'
+               : r.state && r.state.scheduled ? 'Meta still has it queued.'
+               : 'Meta has not published it.')
            : 'Done.');
       if (r && r.warnings && r.warnings.length) toast(r.warnings.join(' · '), true);
       return loadDay(date);

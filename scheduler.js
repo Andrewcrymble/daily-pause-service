@@ -1,12 +1,16 @@
 /**
- * The clock. Ticks, finds Instagram jobs that are due, publishes them.
+ * The clock. Two jobs on every tick: publish the Instagram posts that are due,
+ * and check that the Facebook posts that were due actually went out.
  *
- * Facebook needs nothing here — those posts are scheduled on Meta's side the
- * moment the day is accepted, and Meta fires them.
+ * The second one was added on 14 September 2026, after a Facebook post failed
+ * at its slot and nothing here noticed. Meta publishes an API-scheduled post
+ * using the credentials that created it; the Page token had been replaced in
+ * between, so the post died quietly in Business Suite while this service went
+ * on believing it was scheduled. Trusting "scheduled" is trusting a promise.
  */
 import { config } from './config.js';
-import { dueInstagramJobs, updatePost, readDay } from './store.js';
-import { publishInstagram } from './publisher.js';
+import { dueInstagramJobs, dueFacebookVerifications, updatePost, readDay } from './store.js';
+import { publishInstagram, verifyFacebook } from './publisher.js';
 
 const MAX_ATTEMPTS = 3;
 const RETRY_AFTER_MS = 5 * 60_000;
@@ -30,6 +34,21 @@ export async function tick(now = Date.now()) {
   if (running) return;                    // never overlap; a container poll can run 2 minutes
   running = true;
   try {
+    // Did the Facebook posts that were due actually publish?
+    for (const { date, slot } of dueFacebookVerifications(now)) {
+      try {
+        const state = await verifyFacebook(date, slot, now);
+        if (state && !state.published && !state.scheduled) {
+          note({ event: 'facebook_did_not_publish', date, slot,
+                 reason: state.missing ? 'Meta no longer has the post' : state.error });
+        } else if (state && state.published) {
+          note({ event: 'facebook_confirmed', date, slot });
+        }
+      } catch (err) {
+        note({ event: 'verify_error', date, slot, error: err.message });
+      }
+    }
+
     for (const { date, slot } of dueInstagramJobs(now)) {
       const post = readDay(date).posts.find((p) => p.slot === slot);
       const ig = post.instagram;

@@ -378,3 +378,59 @@ export async function updatePostMessage(postId, message) {
   if (r.success === false) throw new GraphError('Edit was refused', r);
   return true;
 }
+
+/* ------------------------------------------------- did it actually go out -- */
+
+/**
+ * Read a post back from Meta and say whether it is really on the Page.
+ *
+ * Scheduling a post is not the same as publishing one. Meta publishes an
+ * API-scheduled post using the credentials that created it, and if those stop
+ * working in between — a regenerated Page token, a revoked app — the post fails
+ * at its slot with no signal of any kind to the thing that scheduled it. It
+ * simply never appears. This is the only way to find out.
+ *
+ * Returns { published, scheduled, missing, permalink, at, error }.
+ */
+export async function postState(postId) {
+  try {
+    const r = await graph(postId, {
+      query: { fields: 'is_published,created_time,scheduled_publish_time,permalink_url' },
+    });
+    const scheduled = Boolean(r.scheduled_publish_time);
+    return {
+      published: r.is_published === true && !scheduled,
+      scheduled,
+      missing: false,
+      permalink: r.permalink_url ?? null,
+      at: r.created_time ?? null,
+      error: null,
+    };
+  } catch (err) {
+    // Meta answers "does not exist" for a post that has been deleted, and for
+    // one whose object has broken. Both mean it is not going out.
+    const missing = /does not exist|cannot be loaded|Unsupported get request/i
+      .test(err.message);
+    return { published: false, scheduled: false, missing,
+             permalink: null, at: null, error: err.message };
+  }
+}
+
+/** Publish a photo to the Page right now, rather than scheduling it. */
+export async function publishFacebookNow({ imageBuffer, caption, pageId = config.pageId }) {
+  const form = new FormData();
+  form.set('caption', caption);
+  form.set('source', new Blob([imageBuffer], { type: 'image/jpeg' }), 'card.jpg');
+  const r = await graph(`${pageId}/photos`, { method: 'POST', body: form });
+  if (!r.post_id && !r.id) throw new GraphError('Photo post returned no id', r);
+
+  const postId = r.post_id ?? null;
+  let permalink = null;
+  if (postId) {
+    try {
+      const p = await graph(postId, { query: { fields: 'permalink_url' } });
+      permalink = p.permalink_url ?? null;
+    } catch { /* best effort */ }
+  }
+  return { postId, photoId: r.id ?? null, permalink };
+}

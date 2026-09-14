@@ -54,6 +54,25 @@ export function dueInstagramJobs(now = Date.now()) {
 }
 
 /**
+ * Every Facebook post that claims to be scheduled and whose slot has passed.
+ * These are the ones worth asking Meta about — "scheduled" is Meta's promise,
+ * not its receipt.
+ */
+export function dueFacebookVerifications(now = Date.now(), graceMs = 600_000) {
+  const out = [];
+  for (const date of listDays().slice(-3)) {
+    const day = readDay(date);
+    if (!day) continue;
+    for (const post of day.posts) {
+      const fb = post.facebook;
+      if (!fb || fb.status !== 'scheduled' || !fb.postId) continue;
+      if (Date.parse(fb.dueAt) + graceMs <= now) out.push({ date, slot: post.slot });
+    }
+  }
+  return out;
+}
+
+/**
  * Update one post in place and persist. Re-reads first so a concurrent write
  * from an HTTP request is not clobbered by the scheduler tick.
  */

@@ -89,3 +89,91 @@ export async function publishInstagram(date, slot, { force = false } = {}) {
     throw err;
   }
 }
+
+/* --------------------------------------------- verifying and repairing --- */
+
+// How long after a slot to wait before asking Meta whether the post really
+// went out. Meta's own publish is not instant, and neither is its read-back.
+const VERIFY_AFTER_MS = 10 * 60_000;
+
+/**
+ * For one post: ask Meta whether the Facebook post actually published, and
+ * record the answer. Returns null when it is not yet time to ask.
+ *
+ * This exists because "scheduled" is a promise, not a fact. A post scheduled
+ * under a token that is later replaced fails silently at its slot.
+ */
+export async function verifyFacebook(date, slot, now = Date.now()) {
+  const day = readDay(date);
+  const post = day?.posts.find((p) => p.slot === slot);
+  if (!post) return null;
+
+  const fb = post.facebook;
+  if (!fb || fb.status !== 'scheduled' || !fb.postId) return null;
+  if (now - Date.parse(fb.dueAt) < VERIFY_AFTER_MS) return null;
+
+  if (config.dryRun) {
+    updatePost(date, slot, (p) => {
+      p.facebook = { ...p.facebook, status: 'published', verifiedAt: iso() };
+    });
+    return { published: true, dryRun: true };
+  }
+
+  const state = await meta.postState(fb.postId);
+  updatePost(date, slot, (p) => {
+    if (state.published) {
+      p.facebook = { ...p.facebook, status: 'published', permalink: state.permalink,
+                     verifiedAt: iso() };
+    } else if (state.scheduled) {
+      // Meta still has it queued. Late, but not lost.
+      p.facebook = { ...p.facebook, verifiedAt: iso() };
+    } else {
+      p.facebook = { ...p.facebook, status: 'failed_to_publish', verifiedAt: iso(),
+                     error: state.missing
+                       ? 'Meta no longer has this post — it cannot publish'
+                       : (state.error || 'Meta did not publish it') };
+    }
+  });
+  return state;
+}
+
+/**
+ * Put a post on Facebook now, rather than at a slot. The repair for a slot
+ * that failed, was missed, or was written too close to its time.
+ */
+export async function publishFacebookNow(date, slot) {
+  const day = readDay(date);
+  const post = day.posts.find((p) => p.slot === slot);
+  if (!post) throw new Error(`No ${slot} post on ${date}`);
+  if (post.facebook?.status === 'published') return { skipped: 'already published' };
+
+  // If Meta still holds a broken scheduled post for this slot, take it away
+  // first, or the page ends up with two.
+  if (post.facebook?.postId && !config.dryRun) {
+    try { await meta.cancelFacebookPost(post.facebook.postId); } catch { /* already gone */ }
+  }
+
+  if (config.dryRun) {
+    updatePost(date, slot, (p) => {
+      p.facebook = { ...p.facebook, status: 'published', postId: `dry_now_${date}_${slot}`,
+                     verified: true, publishedLate: true, at: iso() };
+    });
+    return { postId: `dry_now_${date}_${slot}`, dryRun: true };
+  }
+
+  try {
+    const buf = readFileSync(join(cardsDir, `${date}-${slot}.jpg`));
+    const r = await meta.publishFacebookNow({ imageBuffer: buf, caption: post.caption });
+    updatePost(date, slot, (p) => {
+      p.facebook = { ...p.facebook, status: 'published', postId: r.postId,
+                     photoId: r.photoId, permalink: r.permalink, verified: true,
+                     publishedLate: true, at: iso() };
+    });
+    return r;
+  } catch (err) {
+    updatePost(date, slot, (p) => {
+      p.facebook = { ...p.facebook, status: 'failed', error: err.message, at: iso() };
+    });
+    throw err;
+  }
+}

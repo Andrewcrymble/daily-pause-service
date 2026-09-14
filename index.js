@@ -15,7 +15,9 @@ import { timingSafeEqual } from 'node:crypto';
 import { config, cardsDir, ensureDirs, configProblems } from './config.js';
 import { zonedToUtc, todayIn, isDateString } from './time.js';
 import { readDay, writeDay, listDays, updatePost } from './store.js';
-import { scheduleFacebook, publishInstagram, cardUrl } from './publisher.js';
+import { scheduleFacebook, publishInstagram, publishFacebookNow, verifyFacebook,
+         cardUrl } from './publisher.js';
+import { check as dayCheck } from './check.js';
 import { overview as statsOverview } from './insights.js';
 import * as meta from './meta.js';
 import { start as startScheduler, log as schedulerLog } from './scheduler.js';
@@ -285,6 +287,15 @@ async function route(req, res, url) {
     return day ? send(res, 200, day) : send(res, 404, { error: 'no record for that date' });
   }
 
+  // The watchman. One object, no secrets, safe to paste anywhere: is today
+  // all right? A scheduled task reads this after each slot and only speaks up
+  // when ok is false.
+  if (req.method === 'GET' && url.pathname === '/api/check') {
+    const date = url.searchParams.get('date') || undefined;
+    if (date && !isDateString(date)) bad('date must be yyyy-mm-dd');
+    return send(res, 200, await dayCheck({ date }));
+  }
+
   if (req.method === 'GET' && url.pathname === '/api/insights') {
     const days = Math.min(90, Math.max(7, Number(url.searchParams.get('days')) || 30));
     const refresh = url.searchParams.get('refresh') === '1';
@@ -403,6 +414,29 @@ async function route(req, res, url) {
         }
       }
       return send(res, 200, { ...out, day: readDay(date) });
+    }
+
+    // --- put it on Facebook now ------------------------------------------
+    // The repair for a slot Meta failed to publish, or one written too close
+    // to its time to schedule.
+    if (action === 'facebook-now') {
+      try {
+        return send(res, 200, { facebook: await publishFacebookNow(date, slot),
+                                day: readDay(date) });
+      } catch (err) {
+        return send(res, 502, { error: err.message, day: readDay(date) });
+      }
+    }
+
+    // --- ask Meta whether it really published it --------------------------
+    if (action === 'verify') {
+      try {
+        const state = await verifyFacebook(date, slot, Date.now());
+        return send(res, 200, { state: state ?? 'not due for checking yet',
+                                day: readDay(date) });
+      } catch (err) {
+        return send(res, 502, { error: err.message });
+      }
     }
 
     // --- (re)schedule Facebook for a slot that failed or was cancelled ----
