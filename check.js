@@ -130,3 +130,32 @@ async function withToken(out) {
   }
   return out;
 }
+
+/**
+ * The same verdict, stripped of everything that is nobody else's business.
+ *
+ * Public on purpose. The authenticated check needs a token, which means the
+ * thing best placed to raise the alarm — a scheduled task, or whoever is
+ * helping at the time — cannot ask the question. This can be asked by anyone,
+ * and gives away nothing the Page does not already show: no captions, no post
+ * ids, no links, no token, no dates beyond the day itself.
+ */
+export async function pulse(opts) {
+  const full = await check(opts);
+  return {
+    ok: full.ok,
+    date: full.date,
+    checkedAt: full.checkedAt,
+    // Counts and statuses only.
+    slots: full.slots.map((s) => ({
+      slot: s.slot, facebook: s.facebook, instagram: s.instagram, held: s.held,
+    })),
+    trouble: full.problems.length,
+    tokenOk: full.token
+      ? (full.token.dryRun ? null
+         : Boolean(full.token.permanent && full.token.pageMatches &&
+                   !(full.token.missingScopes || []).length))
+      : null,
+    dataAccessDaysLeft: full.token?.dataAccessDaysLeft ?? null,
+  };
+}

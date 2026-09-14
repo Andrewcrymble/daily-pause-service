@@ -17,7 +17,7 @@ import { zonedToUtc, todayIn, isDateString } from './time.js';
 import { readDay, writeDay, listDays, updatePost } from './store.js';
 import { scheduleFacebook, publishInstagram, publishFacebookNow, verifyFacebook,
          cardUrl } from './publisher.js';
-import { check as dayCheck } from './check.js';
+import { check as dayCheck, pulse as dayPulse } from './check.js';
 import { overview as statsOverview } from './insights.js';
 import * as meta from './meta.js';
 import { start as startScheduler, log as schedulerLog } from './scheduler.js';
@@ -251,6 +251,14 @@ async function route(req, res, url) {
   if (req.method === 'GET' && url.pathname === '/') {
     return send(res, 200, DASHBOARD_HTML,
       { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
+  }
+
+  // Public, deliberately. Statuses and counts, nothing else — so that a
+  // scheduled task can raise the alarm without being handed a token.
+  if (req.method === 'GET' && url.pathname === '/pulse') {
+    const date = url.searchParams.get('date') || undefined;
+    if (date && !isDateString(date)) bad('date must be yyyy-mm-dd');
+    return send(res, 200, await dayPulse({ date }), { 'cache-control': 'no-store' });
   }
 
   if (req.method === 'GET' && url.pathname === '/healthz') {
