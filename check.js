@@ -12,6 +12,7 @@ import { config } from './config.js';
 import { todayIn } from './time.js';
 import { readDay } from './store.js';
 import * as meta from './meta.js';
+import * as notify from './notify.js';
 
 const iso = () => new Date().toISOString();
 
@@ -32,6 +33,8 @@ export async function check({ date, now = Date.now() } = {}) {
     timezone: config.timezone,
     problems: [],
     slots: [],
+    // Worth knowing on every check: if this is off, silence means nothing.
+    messaging: notify.configured(),
   };
 
   if (!record) {
@@ -151,6 +154,7 @@ export async function pulse(opts) {
       slot: s.slot, facebook: s.facebook, instagram: s.instagram, held: s.held,
     })),
     trouble: full.problems.length,
+    messaging: full.messaging,
     tokenOk: full.token
       ? (full.token.dryRun ? null
          : Boolean(full.token.permanent && full.token.pageMatches &&

@@ -994,7 +994,21 @@ function renderLog() {
     '<div class="tile"><div class="k">Days on record</div><div class="v">' +
       ((s.days || []).length) + '</div><div class="n">' +
       esc((s.days || []).slice(-3).join(', ')) + '</div></div>' +
+    '<div class="tile"><div class="k">Messages</div><div class="v ' +
+      (s.messaging && s.messaging.configured ? 'good' : 'warn') + '">' +
+      (s.messaging && s.messaging.configured ? 'on' : 'off') + '</div>' +
+      '<div class="n">' + (s.messaging && s.messaging.configured
+        ? 'BeepMate · ' + esc(s.messaging.to || '') +
+          (s.messaging.onSuccess ? ' · every post and every failure'
+                                 : ' · failures only')
+        : 'BEEPMATE_KEY and BEEPMATE_ID are not set') + '</div></div>' +
     '</div>';
+
+  if (s.messaging && s.messaging.configured) {
+    html += '<div class="row" style="margin-bottom:18px">' +
+      '<button class="small" id="msgtest">Send me a test message</button>' +
+      '<span class="quiet" id="msgstate"></span></div>';
+  }
 
   var log = s.recent || [];
   html += '<h3 style="margin-bottom:8px">Scheduler</h3>';
@@ -1005,6 +1019,17 @@ function renderLog() {
     : '<p class="quiet">The scheduler has not had anything to say since the last restart.</p>';
   html += '</section>';
   $('panel-log').innerHTML = html;
+
+  var tb = $('msgtest');
+  if (tb) tb.addEventListener('click', function () {
+    tb.disabled = true;
+    $('msgstate').textContent = 'sending…';
+    api('/api/notify/test', { method: 'POST' }).then(function () {
+      $('msgstate').textContent = 'Sent — check your phone.';
+    }).catch(function (e) {
+      $('msgstate').textContent = e.message;
+    }).then(function () { tb.disabled = false; });
+  });
 }
 
 /* =================================================================== tabs */

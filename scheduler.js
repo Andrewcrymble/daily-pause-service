@@ -11,6 +11,7 @@
 import { config } from './config.js';
 import { dueInstagramJobs, dueFacebookVerifications, updatePost, readDay } from './store.js';
 import { publishInstagram, verifyFacebook } from './publisher.js';
+import * as notify from './notify.js';
 
 const MAX_ATTEMPTS = 3;
 const RETRY_AFTER_MS = 5 * 60_000;
@@ -23,6 +24,23 @@ const TOO_LATE_MS = 90 * 60_000;
 let timer = null;
 let running = false;
 export const log = [];
+
+/** Tell Andrew a post did not go out. Once, and never at the cost of a tick. */
+async function warn(date, slot, on, reason) {
+  try {
+    let already = false;
+    updatePost(date, slot, (p) => {
+      p.notified = p.notified || {};
+      already = Boolean(p.notified[on]);
+      if (!already) p.notified[on] = new Date().toISOString();
+    });
+    if (already) return;
+    const r = await notify.say(notify.didNot({ date, slot, on, reason }));
+    if (r.error) note({ event: 'notify_failed', date, slot, error: r.error });
+  } catch (err) {
+    note({ event: 'notify_failed', date, slot, error: err.message });
+  }
+}
 
 function note(entry) {
   log.unshift({ at: new Date().toISOString(), ...entry });
@@ -56,11 +74,15 @@ export async function tick(now = Date.now()) {
       if (now - Date.parse(ig.dueAt) > TOO_LATE_MS) {
         updatePost(date, slot, (p) => { p.instagram.status = 'missed'; });
         note({ event: 'missed', date, slot, reason: 'too far past its slot' });
+        await warn(date, slot, 'instagram',
+          'It was more than 90 minutes past its slot, so it was deliberately not sent.');
         continue;
       }
       if ((ig.attempts ?? 0) >= MAX_ATTEMPTS) {
         updatePost(date, slot, (p) => { p.instagram.status = 'failed_final'; });
         note({ event: 'gave_up', date, slot, attempts: ig.attempts });
+        await warn(date, slot, 'instagram',
+          `Tried ${ig.attempts} times and gave up. Last error: ${ig.error || 'unknown'}`);
         continue;
       }
       if (ig.status === 'failed' && now - Date.parse(ig.at) < RETRY_AFTER_MS) continue;

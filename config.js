@@ -33,8 +33,18 @@ export const config = {
   dataDir: resolve(process.env.DATA_DIR || './data'),
   tickMs: int(process.env.TICK_MS, 30_000),
 
+  // BeepMate — a WhatsApp message when a post goes out, and when one does not.
+  // Optional: with these unset the service simply says nothing.
+  beepmateKey: process.env.BEEPMATE_KEY || '',
+  beepmateId: process.env.BEEPMATE_ID || '',
+  // Turn this off to be told only about failures.
+  notifyOnSuccess: bool(process.env.NOTIFY_ON_SUCCESS, true),
+
   // No Graph calls. Everything else runs for real.
   dryRun: bool(process.env.DRY_RUN),
+
+  // No messages either. Set with DRY_RUN in tests.
+  notifyDryRun: bool(process.env.NOTIFY_DRY_RUN),
 };
 
 export const cardsDir = resolve(config.dataDir, 'cards');

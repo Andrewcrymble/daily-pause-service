@@ -7,8 +7,25 @@ import { join } from 'node:path';
 import { config, cardsDir } from './config.js';
 import { updatePost, readDay } from './store.js';
 import * as meta from './meta.js';
+import * as notify from './notify.js';
 
 const iso = () => new Date().toISOString();
+
+/**
+ * Say it once. The flag is written before the send, so a BeepMate outage
+ * cannot turn into the same message every thirty seconds for an hour.
+ */
+async function tell(date, slot, on, text) {
+  if (config.notifyDryRun || !notify.configured()) return { skipped: true };
+  let already = false;
+  updatePost(date, slot, (p) => {
+    p.notified = p.notified || {};
+    already = Boolean(p.notified[on]);
+    if (!already) p.notified[on] = iso();
+  });
+  if (already) return { skipped: 'already told' };
+  return notify.say(text);
+}
 
 export function cardUrl(day, slot) {
   return `${config.baseUrl}/cards/${day}-${slot}.jpg`;
@@ -80,6 +97,10 @@ export async function publishInstagram(date, slot, { force = false } = {}) {
       p.instagram = { ...p.instagram, status: 'published', mediaId: r.mediaId,
                       permalink: r.permalink, at: iso() };
     });
+    if (config.notifyOnSuccess) {
+      await tell(date, slot, 'instagram',
+        notify.wentOut({ slot, on: 'instagram', permalink: r.permalink }));
+    }
     return r;
   } catch (err) {
     updatePost(date, slot, (p) => {
@@ -120,6 +141,17 @@ export async function verifyFacebook(date, slot, now = Date.now()) {
   }
 
   const state = await meta.postState(fb.postId);
+  if (state.published && config.notifyOnSuccess) {
+    await tell(date, slot, 'facebook',
+      notify.wentOut({ slot, on: 'facebook', permalink: state.permalink }));
+  } else if (!state.published && !state.scheduled) {
+    await tell(date, slot, 'facebook', notify.didNot({
+      date, slot, on: 'facebook',
+      reason: state.missing
+        ? 'Meta no longer has this post — it cannot publish it.'
+        : (state.error || 'Meta did not publish it at its slot.'),
+    }));
+  }
   updatePost(date, slot, (p) => {
     if (state.published) {
       p.facebook = { ...p.facebook, status: 'published', permalink: state.permalink,
@@ -168,7 +200,13 @@ export async function publishFacebookNow(date, slot) {
       p.facebook = { ...p.facebook, status: 'published', postId: r.postId,
                      photoId: r.photoId, permalink: r.permalink, verified: true,
                      publishedLate: true, at: iso() };
+      // It was told about the failure; let it be told about the fix.
+      if (p.notified) delete p.notified.facebook;
     });
+    if (config.notifyOnSuccess) {
+      await tell(date, slot, 'facebook',
+        notify.wentOut({ slot, on: 'facebook', permalink: r.permalink, late: true }));
+    }
     return r;
   } catch (err) {
     updatePost(date, slot, (p) => {

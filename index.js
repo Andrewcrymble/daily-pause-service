@@ -18,6 +18,7 @@ import { readDay, writeDay, listDays, updatePost } from './store.js';
 import { scheduleFacebook, publishInstagram, publishFacebookNow, verifyFacebook,
          cardUrl } from './publisher.js';
 import { check as dayCheck, pulse as dayPulse } from './check.js';
+import * as notify from './notify.js';
 import { overview as statsOverview } from './insights.js';
 import * as meta from './meta.js';
 import { start as startScheduler, log as schedulerLog } from './scheduler.js';
@@ -196,6 +197,11 @@ async function status() {
     dryRun: config.dryRun,
     baseUrl: config.baseUrl || null,
     igDelayMinutes: config.igDelayMinutes,
+    messaging: {
+      configured: notify.configured(),
+      onSuccess: config.notifyOnSuccess,
+      to: config.beepmateId ? String(config.beepmateId).slice(-4).padStart(8, '·') : null,
+    },
     problems: configProblems(),
     days: listDays().slice(-7),
     slots: Object.keys(config.slots),
@@ -302,6 +308,16 @@ async function route(req, res, url) {
     const date = url.searchParams.get('date') || undefined;
     if (date && !isDateString(date)) bad('date must be yyyy-mm-dd');
     return send(res, 200, await dayCheck({ date }));
+  }
+
+  // Send yourself a message, to prove the wiring before relying on it.
+  if (req.method === 'POST' && url.pathname === '/api/notify/test') {
+    if (!notify.configured()) {
+      return send(res, 400, { error: 'BEEPMATE_KEY and BEEPMATE_ID are not both set' });
+    }
+    const r = await notify.say(
+      'The Daily Pause — this is a test. Messages are wired up correctly.');
+    return send(res, r.error ? 502 : 200, r);
   }
 
   if (req.method === 'GET' && url.pathname === '/api/insights') {
