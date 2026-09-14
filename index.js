@@ -14,10 +14,12 @@ import { timingSafeEqual } from 'node:crypto';
 
 import { config, cardsDir, ensureDirs, configProblems } from './config.js';
 import { zonedToUtc, todayIn, isDateString } from './time.js';
-import { readDay, writeDay, listDays } from './store.js';
+import { readDay, writeDay, listDays, updatePost } from './store.js';
 import { scheduleFacebook, publishInstagram, cardUrl } from './publisher.js';
+import { overview as statsOverview } from './insights.js';
 import * as meta from './meta.js';
 import { start as startScheduler, log as schedulerLog } from './scheduler.js';
+import { DASHBOARD_HTML } from './dashboard.js';
 
 const MAX_BODY = 25 * 1024 * 1024;
 
@@ -80,6 +82,37 @@ async function acceptDay(body) {
   ensureDirs();
   const warnings = [];
 
+  // Writing over a day that is already live on Meta would leave orphaned
+  // scheduled posts behind and publish the same card twice. Refuse unless the
+  // caller says so explicitly, and then undo the Meta side first.
+  const existing = readDay(date);
+  if (existing) {
+    const live = existing.posts.filter(
+      (p) => p.facebook?.status === 'scheduled' || p.instagram?.status === 'published'
+    );
+    if (live.length && !body.replace) {
+      bad(`${date} is already live on Meta (${live.map((p) => p.slot).join(', ')}). ` +
+          'Send replace: true to cancel and rewrite it, or edit the slots individually.');
+    }
+    for (const p of live) {
+      if (p.instagram?.status === 'published') {
+        warnings.push(`${p.slot}: already on Instagram — that post cannot be unsent`);
+      }
+      if (p.facebook?.status === 'scheduled' && p.facebook.postId) {
+        if (config.dryRun) {
+          warnings.push(`${p.slot}: previous Facebook post cancelled (dry run)`);
+        } else {
+          try {
+            await meta.cancelFacebookPost(p.facebook.postId);
+            warnings.push(`${p.slot}: previous Facebook post cancelled`);
+          } catch (err) {
+            warnings.push(`${p.slot}: could not cancel the previous Facebook post — ${err.message}`);
+          }
+        }
+      }
+    }
+  }
+
   const record = {
     date,
     createdAt: readDay(date)?.createdAt ?? iso(),
@@ -109,6 +142,10 @@ async function acceptDay(body) {
       slot,
       topic: p.topic ?? null,
       caption: String(p.caption),
+      // The words ON the card, kept so the composer can reopen a day and edit
+      // it rather than retyping from the picture.
+      cardText: p.text ?? null,
+      cardReference: p.reference ?? null,
       hold: Boolean(p.hold),
       holdReason: p.holdReason ?? null,
       card: { file: `${date}-${slot}.jpg`, bytes: buf.length, url: cardUrl(date, slot) },
@@ -159,6 +196,7 @@ async function status() {
     igDelayMinutes: config.igDelayMinutes,
     problems: configProblems(),
     days: listDays().slice(-7),
+    slots: Object.keys(config.slots),
     recent: schedulerLog.slice(0, 20),
   };
 
@@ -173,6 +211,9 @@ async function status() {
         dataAccessExpiresAt: t.dataAccessExpiresAt
           ? new Date(t.dataAccessExpiresAt * 1000).toISOString() : null,
         missingScopes: meta.missingScopes(t.scopes),
+        // Absent insight scopes are not a problem — they just cap what the
+        // stats page can show — so they are reported, not added to `problems`.
+        missingInsightScopes: meta.missingInsightScopes(t.scopes),
         pageMatches: String(t.profileId) === String(config.pageId),
       };
       if (!t.neverExpires) out.problems.push('Page token expires — it is not a permanent one');
@@ -202,6 +243,13 @@ async function status() {
 
 async function route(req, res, url) {
   const seg = url.pathname.split('/').filter(Boolean);
+
+  // The dashboard shell is public; every figure on it is fetched with the
+  // bearer token the viewer types in, so nothing is exposed by serving this.
+  if (req.method === 'GET' && url.pathname === '/') {
+    return send(res, 200, DASHBOARD_HTML,
+      { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
+  }
 
   if (req.method === 'GET' && url.pathname === '/healthz') {
     return send(res, 200, { ok: true, at: iso() });
@@ -237,12 +285,135 @@ async function route(req, res, url) {
     return day ? send(res, 200, day) : send(res, 404, { error: 'no record for that date' });
   }
 
+  if (req.method === 'GET' && url.pathname === '/api/insights') {
+    const days = Math.min(90, Math.max(7, Number(url.searchParams.get('days')) || 30));
+    const refresh = url.searchParams.get('refresh') === '1';
+    return send(res, 200, await statsOverview({ days, refresh }));
+  }
+
   if (req.method === 'POST' && seg[0] === 'api' && seg[1] === 'days' && seg.length === 5) {
     const [, , date, slot, action] = seg;
     const day = readDay(date);
     if (!day) return send(res, 404, { error: 'no record for that date' });
     const post = day.posts.find((p) => p.slot === slot);
     if (!post) return send(res, 404, { error: 'no such slot' });
+
+    // --- edit the caption -------------------------------------------------
+    // The caption is the words under the card, not the words on it. Instagram
+    // reads it at publish time, so only Facebook needs telling.
+    if (action === 'caption') {
+      const body = await readBody(req);
+      const caption = String(body.caption ?? '').trim();
+      if (!caption) bad('caption cannot be empty');
+
+      const out = { caption, facebook: 'not scheduled', instagram: 'will use the new caption' };
+      if (post.facebook?.status === 'published') {
+        return send(res, 409, { error: 'that post has already gone out on Facebook' });
+      }
+      if (post.facebook?.postId && post.facebook.status === 'scheduled' && !config.dryRun) {
+        try {
+          await meta.updatePostMessage(post.facebook.postId, caption);
+          out.facebook = 'updated on Meta';
+        } catch (err) {
+          return send(res, 502, { error: `Facebook refused the edit: ${err.message}` });
+        }
+      } else if (config.dryRun) out.facebook = 'dry run';
+
+      if (post.instagram?.status === 'published') out.instagram = 'already published — unchanged';
+      updatePost(date, slot, (p) => { p.caption = caption; });
+      return send(res, 200, { ...out, day: readDay(date) });
+    }
+
+    // --- replace the card image ------------------------------------------
+    // Meta will not swap the photo on a scheduled post, so this cancels and
+    // rebuilds rather than editing.
+    if (action === 'card') {
+      const body = await readBody(req);
+      const { buf, type } = decodeCard(body.imageBase64);
+      if (buf.length < 1024) bad('card image is missing or implausibly small');
+      const warnings = [];
+      if (type && type !== 'image/jpeg') warnings.push(`card is ${type}; Instagram wants JPEG`);
+
+      if (post.instagram?.status === 'published') {
+        return send(res, 409, { error: 'that post is already on Instagram' });
+      }
+      if (post.facebook?.status === 'published') {
+        return send(res, 409, { error: 'that post has already gone out on Facebook' });
+      }
+
+      writeFileSync(join(cardsDir, `${date}-${slot}.jpg`), buf);
+      updatePost(date, slot, (p) => {
+        p.card = { file: `${date}-${slot}.jpg`, bytes: buf.length, url: cardUrl(date, slot) };
+        if (body.text !== undefined) p.cardText = String(body.text);
+        if (body.reference !== undefined) p.cardReference = body.reference || null;
+      });
+
+      let facebook = 'not scheduled';
+      if (post.facebook?.postId && post.facebook.status === 'scheduled') {
+        if (!config.dryRun) {
+          try { await meta.cancelFacebookPost(post.facebook.postId); }
+          catch (err) { warnings.push(`could not cancel the old Facebook post — ${err.message}`); }
+        }
+        updatePost(date, slot, (p) => {
+          p.facebook = { dueAt: p.facebook.dueAt, status: 'pending' };
+        });
+        try {
+          await scheduleFacebook(date, slot);
+          facebook = 'rescheduled with the new card';
+        } catch (err) {
+          facebook = `failed: ${err.message}`;
+          warnings.push(`Facebook rescheduling failed — ${err.message}`);
+        }
+      }
+      return send(res, 200, { facebook, warnings, day: readDay(date) });
+    }
+
+    // --- hold and release -------------------------------------------------
+    if (action === 'hold' || action === 'release') {
+      const body = await readBody(req).catch(() => ({}));
+      const hold = action === 'hold';
+      const out = { hold, facebook: 'unchanged' };
+
+      if (hold) {
+        if (post.facebook?.postId && post.facebook.status === 'scheduled') {
+          if (!config.dryRun) {
+            try { await meta.cancelFacebookPost(post.facebook.postId); }
+            catch (err) { return send(res, 502, { error: `could not hold it on Meta: ${err.message}` }); }
+          }
+          out.facebook = 'cancelled on Meta';
+        }
+        updatePost(date, slot, (p) => {
+          p.hold = true;
+          p.holdReason = body.reason ?? null;
+          if (p.facebook) p.facebook = { dueAt: p.facebook.dueAt, status: 'held' };
+          if (p.instagram && p.instagram.status !== 'published') p.instagram.status = 'held';
+        });
+      } else {
+        updatePost(date, slot, (p) => {
+          p.hold = false;
+          p.holdReason = null;
+          if (p.facebook) p.facebook = { dueAt: p.facebook.dueAt, status: 'pending' };
+          if (p.instagram && p.instagram.status !== 'published') p.instagram.status = 'queued';
+        });
+        try {
+          await scheduleFacebook(date, slot);
+          out.facebook = 'scheduled';
+        } catch (err) {
+          out.facebook = `could not schedule: ${err.message}`;
+        }
+      }
+      return send(res, 200, { ...out, day: readDay(date) });
+    }
+
+    // --- (re)schedule Facebook for a slot that failed or was cancelled ----
+    if (action === 'reschedule') {
+      try {
+        const r = await scheduleFacebook(date, slot);
+        return send(res, 200, { facebook: r, day: readDay(date) });
+      } catch (err) {
+        return send(res, 502, { error: err.message, day: readDay(date) });
+      }
+    }
 
     if (action === 'cancel') {
       const out = { instagram: 'cancelled', facebook: null };

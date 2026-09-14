@@ -141,7 +141,8 @@ export async function publishInstagram({ imageUrl, caption, igUserId = config.ig
   if (!igUserId) throw new GraphError('No Instagram user id configured');
 
   // Instagram's error when it cannot fetch the file is uselessly vague, so
-  // establish reachability here where the message is readable.
+  // establish reachability here where the message is readable. GET, not HEAD:
+  // the /cards/ route answers GET only, and GET is what Instagram does.
   const head = await fetch(imageUrl, { method: 'GET' });
   if (!head.ok) {
     throw new GraphError(`Card is not publicly reachable (${head.status})`, imageUrl);
@@ -191,4 +192,189 @@ export async function instagramQuota(igUserId = config.igUserId) {
   if (!row) return null;
   const total = row.config?.quota_total ?? 100;
   return { used: row.quota_usage ?? 0, total, remaining: total - (row.quota_usage ?? 0) };
+}
+
+/* ---------------------------------------------------------------- stats -- */
+
+/**
+ * Two tiers of figures live below.
+ *
+ * Tier one — likes, comments, shares, follower counts — needs only the scopes
+ * the posting side already has. Tier two — reach, impressions, saves, and the
+ * daily trend — needs `read_insights` on the Page and `instagram_manage_insights`
+ * on the account. The token may well not carry those, so every tier-two call is
+ * allowed to fail on its own without taking the rest of the response with it.
+ */
+export const INSIGHT_SCOPES = ['read_insights', 'instagram_manage_insights'];
+
+export function missingInsightScopes(scopes = []) {
+  return INSIGHT_SCOPES.filter((s) => !scopes.includes(s));
+}
+
+/** Runs a call and returns null rather than throwing. For tier two only. */
+async function soft(fn) {
+  try { return await fn(); } catch (e) { return { __error: e.message }; }
+}
+
+const isErr = (v) => !v || typeof v !== 'object' || '__error' in v;
+
+export async function audience({ pageId = config.pageId, igUserId = config.igUserId } = {}) {
+  const out = { facebook: null, instagram: null };
+
+  const page = await soft(() => graph(pageId, { query: { fields: 'followers_count,fan_count,name' } }));
+  if (!isErr(page)) {
+    out.facebook = {
+      name: page.name ?? null,
+      followers: page.followers_count ?? page.fan_count ?? null,
+    };
+  } else out.facebook = { error: page?.__error ?? 'unavailable' };
+
+  if (igUserId) {
+    const ig = await soft(() => graph(igUserId, {
+      query: { fields: 'followers_count,media_count,username' },
+    }));
+    if (!isErr(ig)) {
+      out.instagram = {
+        username: ig.username ?? null,
+        followers: ig.followers_count ?? null,
+        posts: ig.media_count ?? null,
+      };
+    } else out.instagram = { error: ig?.__error ?? 'unavailable' };
+  }
+
+  return out;
+}
+
+/**
+ * Engagement for a batch of Facebook posts, keyed by post id.
+ * `ids` batching keeps this to one round trip however many posts there are.
+ */
+export async function facebookPostStats(postIds = []) {
+  const ids = postIds.filter(Boolean);
+  if (!ids.length) return {};
+
+  const basic = await soft(() => graph('', {
+    query: {
+      ids: ids.join(','),
+      fields: 'permalink_url,created_time,shares,' +
+              'reactions.summary(total_count).limit(0),' +
+              'comments.summary(total_count).limit(0)',
+    },
+  }));
+
+  const out = {};
+  for (const id of ids) {
+    const row = !isErr(basic) ? basic[id] : null;
+    out[id] = {
+      permalink: row?.permalink_url ?? null,
+      postedAt: row?.created_time ?? null,
+      likes: row?.reactions?.summary?.total_count ?? null,
+      comments: row?.comments?.summary?.total_count ?? null,
+      shares: row?.shares?.count ?? 0,
+      reach: null,
+      clicks: null,
+    };
+  }
+
+  // Tier two. One call per post — Graph will not batch insights through `ids`.
+  await Promise.all(ids.map(async (id) => {
+    const ins = await soft(() => graph(`${id}/insights`, {
+      query: { metric: 'post_impressions_unique,post_clicks' },
+    }));
+    if (isErr(ins)) return;
+    for (const m of ins.data ?? []) {
+      const v = m.values?.[0]?.value ?? null;
+      if (m.name === 'post_impressions_unique') out[id].reach = v;
+      if (m.name === 'post_clicks') out[id].clicks = v;
+    }
+  }));
+
+  return out;
+}
+
+/** Engagement for a batch of Instagram media, keyed by media id. */
+export async function instagramMediaStats(mediaIds = []) {
+  const ids = mediaIds.filter(Boolean);
+  if (!ids.length) return {};
+
+  const basic = await soft(() => graph('', {
+    query: { ids: ids.join(','), fields: 'permalink,timestamp,like_count,comments_count' },
+  }));
+
+  const out = {};
+  for (const id of ids) {
+    const row = !isErr(basic) ? basic[id] : null;
+    out[id] = {
+      permalink: row?.permalink ?? null,
+      postedAt: row?.timestamp ?? null,
+      likes: row?.like_count ?? null,
+      comments: row?.comments_count ?? null,
+      reach: null,
+      saves: null,
+    };
+  }
+
+  await Promise.all(ids.map(async (id) => {
+    const ins = await soft(() => graph(`${id}/insights`, {
+      query: { metric: 'reach,saved' },
+    }));
+    if (isErr(ins)) return;
+    for (const m of ins.data ?? []) {
+      const v = m.values?.[0]?.value ?? null;
+      if (m.name === 'reach') out[id].reach = v;
+      if (m.name === 'saved') out[id].saves = v;
+    }
+  }));
+
+  return out;
+}
+
+/**
+ * Daily reach for the last `days` days on both platforms.
+ * Tier two throughout — returns nulls, not an error, when the scope is absent.
+ */
+export async function dailyReach({ days = 30, pageId = config.pageId,
+                                   igUserId = config.igUserId } = {}) {
+  const until = Math.floor(Date.now() / 1000);
+  const since = until - days * 86_400;
+  const series = { facebook: null, instagram: null, error: null };
+
+  const fb = await soft(() => graph(`${pageId}/insights`, {
+    query: { metric: 'page_impressions_unique', period: 'day', since, until },
+  }));
+  if (!isErr(fb)) {
+    const row = (fb.data ?? [])[0];
+    series.facebook = (row?.values ?? []).map((v) => ({
+      date: String(v.end_time).slice(0, 10), value: v.value ?? 0,
+    }));
+  } else series.error = fb?.__error ?? null;
+
+  if (igUserId) {
+    const ig = await soft(() => graph(`${igUserId}/insights`, {
+      query: { metric: 'reach', period: 'day', since, until },
+    }));
+    if (!isErr(ig)) {
+      const row = (ig.data ?? [])[0];
+      series.instagram = (row?.values ?? []).map((v) => ({
+        date: String(v.end_time).slice(0, 10), value: v.value ?? 0,
+      }));
+    } else if (!series.error) series.error = ig?.__error ?? null;
+  }
+
+  return series;
+}
+
+/* ------------------------------------------------------- editing a post -- */
+
+/**
+ * Change the message on a post that is scheduled but not yet published.
+ * Meta allows the text to be edited in place; the image cannot be swapped,
+ * which is why a card change means delete-and-recreate.
+ */
+export async function updatePostMessage(postId, message) {
+  const r = await graph(postId, {
+    method: 'POST', body: new URLSearchParams({ message }),
+  });
+  if (r.success === false) throw new GraphError('Edit was refused', r);
+  return true;
 }
