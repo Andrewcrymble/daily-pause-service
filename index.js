@@ -19,6 +19,7 @@ import { scheduleFacebook, publishInstagram, publishFacebookNow, verifyFacebook,
          cardUrl, cardFile, reelUrl, reelFile } from './publisher.js';
 import { check as dayCheck, pulse as dayPulse } from './check.js';
 import * as notify from './notify.js';
+import * as voice from './voice.js';
 import { overview as statsOverview } from './insights.js';
 import * as meta from './meta.js';
 import { start as startScheduler, log as schedulerLog } from './scheduler.js';
@@ -262,6 +263,12 @@ async function status() {
       onSuccess: config.notifyOnSuccess,
       to: config.beepmateId ? String(config.beepmateId).slice(-4).padStart(8, '·') : null,
     },
+    // The endpoint id is not a secret — it is half of a public URL. The key is,
+    // and is never reported.
+    voice: {
+      configured: voice.configured(),
+      endpoint: config.runpodEndpointId || null,
+    },
     problems: configProblems(),
     days: listDays().slice(-7),
     slots: Object.keys(config.slots),
@@ -385,6 +392,40 @@ async function route(req, res, url) {
   }
 
   // Send yourself a message, to prove the wiring before relying on it.
+  // Speak one short line and report what came back. Deliberately does not
+  // return the audio — this answers "is the voice reachable", and a megabyte
+  // of base64 in a diagnostic reply helps nobody.
+  if (req.method === 'POST' && url.pathname === '/api/voice/test') {
+    if (!voice.configured()) {
+      return send(res, 400, { error: 'RUNPOD_ENDPOINT_ID and RUNPOD_API_KEY are not both set' });
+    }
+    const body = await readBody(req).catch(() => ({}));
+    const line = String(body.text || 'Nothing needs deciding tonight.');
+
+    const started = Date.now();
+    const r = await voice.speak(line);
+    if (r.error) return send(res, 502, { error: r.error, waited: Date.now() - started });
+
+    return send(res, 200, {
+      ok: true,
+      spoke: line,
+      seconds: r.seconds,
+      bytes: r.audio.length,
+      format: r.format,
+      sampleRate: r.sampleRate,
+      // model_load of 0 means the worker was already warm.
+      timing: r.timing,
+      settings: r.settings,
+      waited: Date.now() - started,
+    });
+  }
+
+  // Is the endpoint reachable at all? Cheaper than /api/voice/test because it
+  // does not wake a worker.
+  if (req.method === 'GET' && url.pathname === '/api/voice/health') {
+    return send(res, 200, await voice.health());
+  }
+
   if (req.method === 'POST' && url.pathname === '/api/notify/test') {
     if (!notify.configured()) {
       return send(res, 400, { error: 'BEEPMATE_KEY and BEEPMATE_ID are not both set' });

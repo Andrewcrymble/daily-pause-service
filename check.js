@@ -13,6 +13,7 @@ import { todayIn } from './time.js';
 import { readDay } from './store.js';
 import * as meta from './meta.js';
 import * as notify from './notify.js';
+import * as voice from './voice.js';
 
 const iso = () => new Date().toISOString();
 
@@ -35,6 +36,10 @@ export async function check({ date, now = Date.now() } = {}) {
     slots: [],
     // Worth knowing on every check: if this is off, silence means nothing.
     messaging: notify.configured(),
+    // Likewise the voice. A reel without a voiceover is still a reel, so this
+    // never makes the day "not ok" — but it should be visible before somebody
+    // wonders why the reels went quiet.
+    voice: voice.configured(),
   };
 
   if (!record) {
@@ -155,6 +160,7 @@ export async function pulse(opts) {
     })),
     trouble: full.problems.length,
     messaging: full.messaging,
+    voice: full.voice,
     tokenOk: full.token
       ? (full.token.dryRun ? null
          : Boolean(full.token.permanent && full.token.pageMatches &&

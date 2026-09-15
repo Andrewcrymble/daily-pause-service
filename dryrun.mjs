@@ -452,6 +452,21 @@ console.log('\nmessages');
 
   const h = await voice.health();
   check('health reports unconfigured without calling out', h.configured === false, h);
+
+  // The routes that make the voice visible. Unconfigured is the normal state
+  // until RunPod is wired up, and it must be a clear 400 rather than a hang.
+  const t400 = await api('/api/voice/test', { method: 'POST', body: '{}' });
+  check('the voice test refuses when unconfigured', t400.status === 400, t400.status);
+
+  const vh = await (await api('/api/voice/health')).json();
+  check('the voice health route answers', vh.configured === false, vh);
+
+  const st = await (await api('/api/status')).json();
+  check('status reports the voice', st.voice?.configured === false, st.voice);
+  check('and never reports the key', !JSON.stringify(st.voice).includes('KEY'), st.voice);
+
+  const pl = await (await fetch(`http://127.0.0.1:${PORT}/pulse`)).json();
+  check('and so does the public pulse', pl.voice === false, pl.voice);
 }
 
 console.log('\nreels');
