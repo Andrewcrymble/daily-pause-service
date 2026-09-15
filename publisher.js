@@ -44,6 +44,20 @@ export function cardFile(day, slot, format = 'square') {
   return format === 'square' ? `${day}-${slot}.jpg` : `${day}-${slot}-${format}.jpg`;
 }
 
+/**
+ * Where a slot's reel can be fetched from.
+ *
+ * Public, for the same reason the cards are: Instagram, TikTok and YouTube all
+ * pull the file themselves and none of them carry a bearer token.
+ */
+export function reelUrl(day, slot) {
+  return `${config.baseUrl}/reels/${reelFile(day, slot)}`;
+}
+
+export function reelFile(day, slot) {
+  return `${day}-${slot}.mp4`;
+}
+
 /* ------------------------------------------------------- facebook ------- */
 
 export async function scheduleFacebook(date, slot) {

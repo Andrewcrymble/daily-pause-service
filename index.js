@@ -12,11 +12,11 @@ import { writeFileSync, existsSync, readFileSync, statSync } from 'node:fs';
 import { join, normalize } from 'node:path';
 import { timingSafeEqual } from 'node:crypto';
 
-import { config, cardsDir, ensureDirs, configProblems } from './config.js';
+import { config, cardsDir, reelsDir, ensureDirs, configProblems } from './config.js';
 import { zonedToUtc, todayIn, isDateString } from './time.js';
 import { readDay, writeDay, listDays, updatePost } from './store.js';
 import { scheduleFacebook, publishInstagram, publishFacebookNow, verifyFacebook,
-         cardUrl, cardFile } from './publisher.js';
+         cardUrl, cardFile, reelUrl, reelFile } from './publisher.js';
 import { check as dayCheck, pulse as dayPulse } from './check.js';
 import * as notify from './notify.js';
 import { overview as statsOverview } from './insights.js';
@@ -109,6 +109,30 @@ function decodeCard(imageBase64) {
   const raw = String(imageBase64 || '').replace(/^data:image\/[a-z+]+;base64,/, '');
   const buf = Buffer.from(raw, 'base64');
   return { buf, type };
+}
+
+// A reel arrives after the day does, because rendering one takes a minute and a
+// half and the posts must not wait on it. Uploading is therefore its own step
+// rather than part of accepting the day.
+const MIN_REEL_BYTES = 50 * 1024;
+
+function writeReel(date, slot, videoBase64) {
+  const raw = String(videoBase64 || '').replace(/^data:video\/[a-z0-9-]+;base64,/, '');
+  const buf = Buffer.from(raw, 'base64');
+
+  if (buf.length < MIN_REEL_BYTES) {
+    bad(`${slot}: the reel is missing or implausibly small`);
+  }
+  // 'ftyp' at offset 4 is the MP4 signature. Worth checking, because a file
+  // that is not an MP4 fails silently and late — the platform accepts the URL
+  // and rejects it hours afterwards, at the slot, with nobody watching.
+  if (buf.subarray(4, 8).toString('latin1') !== 'ftyp') {
+    bad(`${slot}: that does not look like an MP4`);
+  }
+
+  const file = reelFile(date, slot);
+  writeFileSync(join(reelsDir, file), buf);
+  return { file, bytes: buf.length, url: reelUrl(date, slot) };
 }
 
 async function acceptDay(body) {
@@ -320,6 +344,20 @@ async function route(req, res, url) {
     });
   }
 
+  // Reels, served the same way and for the same reason.
+  if (req.method === 'GET' && seg[0] === 'reels' && seg.length === 2) {
+    const name = normalize(seg[1]).replace(/^(\.\.[/\\])+/, '');
+    if (!/^[\w.-]+\.mp4$/.test(name)) return send(res, 400, { error: 'bad reel name' });
+    const path = join(reelsDir, name);
+    if (!existsSync(path)) return send(res, 404, { error: 'no such reel' });
+    const buf = readFileSync(path);
+    return send(res, 200, buf, {
+      'content-type': 'video/mp4',
+      'content-length': String(statSync(path).size),
+      'cache-control': 'public, max-age=86400, immutable',
+    });
+  }
+
   if (!authorised(req)) return send(res, 401, { error: 'unauthorised' });
 
   if (req.method === 'GET' && url.pathname === '/api/status') {
@@ -393,6 +431,17 @@ async function route(req, res, url) {
       if (post.instagram?.status === 'published') out.instagram = 'already published — unchanged';
       updatePost(date, slot, (p) => { p.caption = caption; });
       return send(res, 200, { ...out, day: readDay(date) });
+    }
+
+    // --- attach the reel --------------------------------------------------
+    // Separate from accepting the day on purpose: rendering a reel takes about
+    // ninety seconds, and Facebook and Instagram must already be scheduled by
+    // then. A reel that never arrives costs the video platforms, nothing else.
+    if (action === 'reel') {
+      const body = await readBody(req);
+      const written = writeReel(date, slot, body.videoBase64);
+      updatePost(date, slot, (p) => { p.reel = { ...written, at: iso() }; });
+      return send(res, 200, { reel: written, day: readDay(date) });
     }
 
     // --- replace the card image ------------------------------------------

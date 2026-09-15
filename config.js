@@ -40,6 +40,12 @@ export const config = {
   // Turn this off to be told only about failures.
   notifyOnSuccess: bool(process.env.NOTIFY_ON_SUCCESS, true),
 
+  // RunPod serverless — Andrew's voice for the reels. Optional: with these
+  // unset the reel is simply made without a voiceover, which is how it has
+  // always been made.
+  runpodEndpointId: process.env.RUNPOD_ENDPOINT_ID || '',
+  runpodApiKey: process.env.RUNPOD_API_KEY || '',
+
   // No Graph calls. Everything else runs for real.
   dryRun: bool(process.env.DRY_RUN),
 
@@ -49,9 +55,12 @@ export const config = {
 
 export const cardsDir = resolve(config.dataDir, 'cards');
 export const daysDir = resolve(config.dataDir, 'days');
+// Reels live beside the cards and are served the same way — publicly, because
+// every platform that takes a video fetches it itself.
+export const reelsDir = resolve(config.dataDir, 'reels');
 
 export function ensureDirs() {
-  for (const d of [config.dataDir, cardsDir, daysDir]) {
+  for (const d of [config.dataDir, cardsDir, daysDir, reelsDir]) {
     if (!existsSync(d)) mkdirSync(d, { recursive: true });
   }
 }
