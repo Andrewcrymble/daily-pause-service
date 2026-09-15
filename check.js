@@ -62,10 +62,19 @@ export async function check({ date, now = Date.now() } = {}) {
       dueAt: fb.dueAt ?? null,
       permalink: fb.permalink ?? null,
       instagramPermalink: ig?.permalink ?? null,
+      // Absent when no reel was uploaded — normal for the daytime slots.
+      // False means the voice failed and the reel went out silent.
+      reelHasAudio: post.reel ? (post.reel.hasAudio ?? null) : null,
     };
     out.slots.push(row);
 
     if (post.hold) continue;
+
+    // Not a failure — the post still goes — but the one fault that is
+    // invisible from the outside, so it is named rather than left to a report.
+    if (post.reel && post.reel.hasAudio === false) {
+      out.problems.push(`${post.slot}: the reel has no audio — the voice failed`);
+    }
 
     if (['failed', 'failed_to_publish', 'too_late'].includes(fb.status)) {
       out.ok = false;
@@ -157,7 +166,13 @@ export async function pulse(opts) {
     // Counts and statuses only.
     slots: full.slots.map((s) => ({
       slot: s.slot, facebook: s.facebook, instagram: s.instagram, held: s.held,
+      // null when no reel was uploaded for that slot, which is normal for the
+      // two daytime slots. False means a reel exists and has no audio — the
+      // voice failed and three video platforms are about to get silence.
+      reelHasAudio: s.reelHasAudio ?? null,
     })),
+    // Hoisted so a watchman does not have to walk the slots to find it.
+    silentReel: full.slots.some((s) => s.reelHasAudio === false),
     trouble: full.problems.length,
     messaging: full.messaging,
     voice: full.voice,

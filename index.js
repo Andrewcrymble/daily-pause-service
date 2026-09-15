@@ -118,6 +118,48 @@ function decodeCard(imageBase64) {
   return { buf, type };
 }
 
+/**
+ * Does this MP4 carry an audio track?
+ *
+ * The reel renderer degrades to silence when the voice endpoint cannot be
+ * reached — deliberately, because a silent reel is better than no post. The
+ * problem is that nothing downstream could tell: a voiceless reel went to three
+ * platforms looking exactly like a good one, and the only record was a line in a
+ * report nobody had to read. On 15 September the voice was down all afternoon
+ * and it was caught only because a rehearsal happened to be running.
+ *
+ * So the file is asked directly. An MP4 describes each track with an `hdlr` box
+ * naming its handler type — `soun` for audio, `vide` for video — and an audio
+ * track almost always also carries an `mp4a` sample-entry box. Scanning for
+ * either is crude next to parsing the box tree properly, but it needs no
+ * dependency and no ffprobe, and the failure it guards against is total silence
+ * rather than a subtly wrong codec.
+ *
+ * Returns true, false, or null when the file is too odd to judge — and null is
+ * reported as unknown rather than quietly treated as fine.
+ */
+function hasAudioTrack(buf) {
+  try {
+    // The moov atom holds the track descriptions and sits within the first few
+    // hundred kilobytes in a faststart file; scanning the lot is cheap enough
+    // for a file this size and avoids guessing where it is.
+    const text = buf.toString('latin1');
+    if (text.indexOf('mp4a') !== -1) return true;
+
+    // No mp4a: look for an hdlr box declaring a sound handler. The handler type
+    // sits eight bytes after the box name.
+    let at = text.indexOf('hdlr');
+    while (at !== -1) {
+      if (text.slice(at + 8, at + 12) === 'soun') return true;
+      at = text.indexOf('hdlr', at + 4);
+    }
+    // A file with no hdlr at all is not one we can judge.
+    return text.indexOf('hdlr') === -1 ? null : false;
+  } catch {
+    return null;
+  }
+}
+
 // A reel arrives after the day does, because rendering one takes a minute and a
 // half and the posts must not wait on it. Uploading is therefore its own step
 // rather than part of accepting the day.
@@ -139,7 +181,8 @@ function writeReel(date, slot, videoBase64) {
 
   const file = reelFile(date, slot);
   writeFileSync(join(reelsDir, file), buf);
-  return { file, bytes: buf.length, url: reelUrl(date, slot) };
+  const audio = hasAudioTrack(buf);
+  return { file, bytes: buf.length, url: reelUrl(date, slot), hasAudio: audio, silent: audio === false };
 }
 
 async function acceptDay(body) {
@@ -480,6 +523,25 @@ async function route(req, res, url) {
     return send(res, 200, analyticsCoverage());
   }
 
+  // Everything that cannot be rebuilt, in one object.
+  //
+  // Cards and reels are deliberately excluded: they are pictures of words we
+  // still hold, and re-rendering them costs a minute. What cannot be recovered
+  // is what the page said and what the numbers were on the day — the day
+  // records and the analytics snapshots. Those are a few kilobytes each and
+  // they are the only irreplaceable thing here.
+  if (req.method === 'GET' && url.pathname === '/api/backup') {
+    const days = listDays().map((d) => readDay(d)).filter(Boolean);
+    const snapshots = snapshotRange('0000-00-00', todayIn(config.timezone));
+    return send(res, 200, {
+      takenAt: iso(),
+      service: config.baseUrl || null,
+      counts: { days: days.length, snapshots: snapshots.length },
+      days,
+      analytics: snapshots,
+    });
+  }
+
   // The whole Command Centre in one object. The dashboard reads this; so can a
   // scheduled task writing the morning brief.
   if (req.method === 'GET' && url.pathname === '/api/command') {
@@ -625,7 +687,17 @@ async function route(req, res, url) {
       const body = await readBody(req);
       const written = writeReel(date, slot, body.videoBase64);
       updatePost(date, slot, (p) => { p.reel = { ...written, at: iso() }; });
-      return send(res, 200, { reel: written, day: readDay(date) });
+      // Accepted either way — a silent reel is still worth posting — but never
+      // accepted quietly. Whoever uploaded it is told in the same breath.
+      return send(res, 200, {
+        reel: written,
+        warning: written.silent
+          ? 'This reel has no audio track. It will post, but the voice is missing.'
+          : written.hasAudio === null
+            ? 'Could not tell whether this reel has audio.'
+            : undefined,
+        day: readDay(date),
+      });
     }
 
     // --- replace the card image ------------------------------------------

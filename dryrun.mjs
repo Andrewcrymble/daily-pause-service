@@ -485,6 +485,23 @@ console.log('\nreels');
 
   const notMp4 = Buffer.alloc(80 * 1024, 7).toString('base64');
 
+  // The same file with the boxes an audio track leaves behind, and without.
+  // A real reel is 1.3 MB of h264 and not worth carrying as a fixture; what is
+  // being tested is whether the scan finds the markers, not whether ffmpeg works.
+  const voicedMp4 = Buffer.concat([
+    Buffer.from([0, 0, 0, 0x18]), Buffer.from('ftypmp42'),
+    Buffer.alloc(40 * 1024, 7),
+    Buffer.from('hdlrxxxxsoun'), Buffer.from('mp4a'),
+    Buffer.alloc(40 * 1024, 7),
+  ]).toString('base64');
+
+  const silentMp4 = Buffer.concat([
+    Buffer.from([0, 0, 0, 0x18]), Buffer.from('ftypmp42'),
+    Buffer.alloc(40 * 1024, 7),
+    Buffer.from('hdlrxxxxvide'),
+    Buffer.alloc(40 * 1024, 7),
+  ]).toString('base64');
+
   const small = await api(`/api/days/${TOMORROW}/2100/reel`, {
     method: 'POST', body: JSON.stringify({ videoBase64: Buffer.alloc(200).toString('base64') }),
   });
@@ -518,6 +535,35 @@ console.log('\nreels');
 
   const traversal = await fetch(`http://127.0.0.1:${PORT}/reels/..%2F..%2Fetc%2Fpasswd`);
   check('a path traversal is refused', traversal.status >= 400, traversal.status);
+
+  // --- the silent reel ------------------------------------------------------
+  // The one fault that looks identical to success from the outside.
+  const voiced = await (await api(`/api/days/${TOMORROW}/2100/reel`, {
+    method: 'POST', body: JSON.stringify({ videoBase64: voicedMp4 }),
+  })).json();
+  check('a reel with an audio track is recognised',
+    voiced.reel.hasAudio === true && voiced.reel.silent === false, voiced.reel);
+  check('and nothing is warned about', voiced.warning === undefined, voiced.warning);
+
+  const silent = await (await api(`/api/days/${TOMORROW}/2100/reel`, {
+    method: 'POST', body: JSON.stringify({ videoBase64: silentMp4 }),
+  })).json();
+  check('a reel with no audio is still accepted', silent.reel.bytes > 0, silent.reel);
+  check('but marked silent', silent.reel.silent === true, silent.reel);
+  check('and the caller is told in the same breath',
+    /no audio track/.test(silent.warning || ''), silent.warning);
+
+  const pulseSilent = await (await fetch(`http://127.0.0.1:${PORT}/pulse?date=${TOMORROW}`)).json();
+  check('the public pulse reports the silent reel',
+    pulseSilent.silentReel === true, pulseSilent.silentReel);
+  check('and it counts as trouble rather than passing quietly',
+    pulseSilent.ok === false && pulseSilent.trouble > 0, pulseSilent);
+
+  const slot2100 = pulseSilent.slots.find((s) => s.slot === '2100');
+  check('the slot carries the audio state', slot2100.reelHasAudio === false, slot2100);
+  const slot0800 = pulseSilent.slots.find((s) => s.slot === '0800');
+  check('a slot with no reel is null, not false',
+    slot0800.reelHasAudio === null, slot0800);
 }
 
 // --- housekeeping: deleting a day, and pruning the volume -------------------
@@ -733,6 +779,25 @@ console.log('\nreels');
     pinHealth.state === 'WARNING' && pinHealth.ageDays === 7, pinHealth);
   check('and the note says so in words',
     /not being shown as current/.test(pinHealth.note || ''), pinHealth.note);
+}
+
+// --- the backup ------------------------------------------------------------
+{
+  console.log('\n# backup');
+  const b = await (await api('/api/backup')).json();
+  check('the backup carries the day records',
+    Array.isArray(b.days) && b.days.length > 0, b.counts);
+  check('and the analytics snapshots',
+    Array.isArray(b.analytics) && b.analytics.length > 0, b.counts);
+  check('the counts match what is inside',
+    b.counts.days === b.days.length && b.counts.snapshots === b.analytics.length, b.counts);
+  check('a day carries its words, not just its pictures',
+    b.days.some((d) => d.posts.some((p) => p.caption)), 'no captions');
+  // Cards and reels are re-renderable from the words; carrying them would make
+  // the backup a hundred times larger for nothing.
+  check('no image data is carried',
+    !JSON.stringify(b).includes('imageBase64'), 'image data present');
+  check('it needs the token', (await fetch(`http://127.0.0.1:${PORT}/api/backup`)).status === 401);
 }
 
 server.close();
