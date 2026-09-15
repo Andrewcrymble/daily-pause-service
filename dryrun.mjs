@@ -461,6 +461,11 @@ console.log('\nmessages');
   const vh = await (await api('/api/voice/health')).json();
   check('the voice health route answers', vh.configured === false, vh);
 
+  const speak400 = await api('/api/voice/speak', {
+    method: 'POST', body: JSON.stringify({ text: 'hello' }),
+  });
+  check('speaking refuses when unconfigured', speak400.status === 400, speak400.status);
+
   const st = await (await api('/api/status')).json();
   check('status reports the voice', st.voice?.configured === false, st.voice);
   check('and never reports the key', !JSON.stringify(st.voice).includes('KEY'), st.voice);
