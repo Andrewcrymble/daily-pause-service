@@ -11,11 +11,21 @@
  */
 import { config } from './config.js';
 
-const ENDPOINT = (id) => `https://api.runpod.ai/v2/${id}/runsync`;
+const RUNSYNC = (id) => `https://api.runpod.ai/v2/${id}/runsync`;
+const STATUS = (id, job) => `https://api.runpod.ai/v2/${id}/status/${job}`;
 
 // Cold start plus generation, with room to spare. RunPod queues rather than
 // refusing when every worker is busy, so the wait can legitimately be long.
-const TIMEOUT_MS = 180_000;
+const TIMEOUT_MS = 240_000;
+
+// How long one HTTP call is given. `/runsync` gives up waiting after about
+// ninety seconds and answers with the job still IN_QUEUE — that is not a
+// failure, it is RunPod handing back the ticket so the caller can poll.
+const CALL_MS = 120_000;
+const POLL_MS = 3_000;
+
+const DONE = new Set(['COMPLETED']);
+const LOST = new Set(['FAILED', 'CANCELLED', 'TIMED_OUT']);
 
 // A Daily Pause line. Longer than this and something upstream is wrong.
 const MAX_CHARS = 600;
@@ -43,16 +53,16 @@ export async function speak(text, { format = 'wav', ...overrides } = {}) {
 
   if (!configured()) return { error: 'The voice endpoint is not configured' };
 
+  const auth = { Authorization: `Bearer ${config.runpodApiKey}` };
+  const deadline = Date.now() + TIMEOUT_MS;
+
   let body;
   try {
-    const r = await fetch(ENDPOINT(config.runpodEndpointId), {
+    const r = await fetch(RUNSYNC(config.runpodEndpointId), {
       method: 'POST',
-      headers: {
-        Authorization: `Bearer ${config.runpodApiKey}`,
-        'Content-Type': 'application/json',
-      },
+      headers: { ...auth, 'Content-Type': 'application/json' },
       body: JSON.stringify({ input: { text: line, format, ...overrides } }),
-      signal: AbortSignal.timeout(TIMEOUT_MS),
+      signal: AbortSignal.timeout(CALL_MS),
     });
     const raw = await r.text();
     if (!r.ok) return { error: `RunPod answered ${r.status}: ${raw.slice(0, 300)}` };
@@ -61,9 +71,33 @@ export async function speak(text, { format = 'wav', ...overrides } = {}) {
     return { error: `The voice endpoint did not answer: ${err.message}` };
   }
 
-  // RunPod wraps the handler's return value, and reports its own failures at
-  // the top level. Both shapes have to be unpicked before anything is trusted.
-  if (body.status && body.status !== 'COMPLETED') {
+  // A job that is still queued or running is not a failed job. `/runsync`
+  // stops waiting after about ninety seconds and hands back the id; on a cold
+  // morning the worker is asleep and this is the normal path, not the
+  // exception. Poll until it finishes or the budget runs out.
+  while (body.status && !DONE.has(body.status) && !LOST.has(body.status)) {
+    if (!body.id) {
+      return { error: `RunPod job ${body.status} with no id to follow` };
+    }
+    if (Date.now() > deadline) {
+      return { error: `RunPod job ${body.status} after ${Math.round(TIMEOUT_MS / 1000)}s ` +
+                      `— it may still finish; job ${body.id}` };
+    }
+    await new Promise((r) => setTimeout(r, POLL_MS));
+    try {
+      const r = await fetch(STATUS(config.runpodEndpointId, body.id), {
+        headers: auth,
+        signal: AbortSignal.timeout(30_000),
+      });
+      const raw = await r.text();
+      if (!r.ok) return { error: `RunPod status answered ${r.status}: ${raw.slice(0, 200)}` };
+      body = JSON.parse(raw);
+    } catch (err) {
+      return { error: `Lost track of RunPod job ${body.id}: ${err.message}` };
+    }
+  }
+
+  if (body.status && LOST.has(body.status)) {
     return { error: `RunPod job ${body.status}: ${body.error || 'no reason given'}` };
   }
   const out = body.output;
