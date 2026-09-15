@@ -60,13 +60,16 @@ export const config = {
 };
 
 export const cardsDir = resolve(config.dataDir, 'cards');
+// The analytics history. Never pruned — it is the one dataset that cannot be
+// re-fetched, because the platforms only remember so far back.
+export const analyticsDir = resolve(config.dataDir, 'analytics');
 export const daysDir = resolve(config.dataDir, 'days');
 // Reels live beside the cards and are served the same way — publicly, because
 // every platform that takes a video fetches it itself.
 export const reelsDir = resolve(config.dataDir, 'reels');
 
 export function ensureDirs() {
-  for (const d of [config.dataDir, cardsDir, daysDir, reelsDir]) {
+  for (const d of [config.dataDir, cardsDir, daysDir, reelsDir, analyticsDir]) {
     if (!existsSync(d)) mkdirSync(d, { recursive: true });
   }
 }

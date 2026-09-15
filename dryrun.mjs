@@ -600,6 +600,131 @@ console.log('\nreels');
   }
 }
 
+// --- the analytics data layer ----------------------------------------------
+{
+  console.log('\n# analytics');
+
+  const { PLATFORMS, METRICS, normaliseRow, totalAcross, delta, pctChange } =
+    await import('../src/analytics.js');
+
+  // The rule the whole thing rests on: absent is null, never zero.
+  const r = normaliseRow({ followers: '4.0', reach: 0, engagement: '' });
+  check('a numeric string is read as a number', r.followers === 4, r.followers);
+  check('a real zero stays zero', r.reach === 0, r.reach);
+  check('an empty value is null, not zero', r.engagement === null, r.engagement);
+  check('an unreported metric is null', r.watchTime === null, r.watchTime);
+  check('every metric is present in the row',
+    METRICS.every((m) => m in r), Object.keys(r).length);
+
+  // Dated relative to today: a window only counts snapshots inside it, so
+  // fixed dates in the past would make every window legitimately empty.
+  const D1 = dateOffset(-7), D2 = dateOffset(0);
+  const one = await api('/api/analytics/snapshot', {
+    method: 'POST',
+    body: JSON.stringify({ date: D1, source: 'test', platforms: {
+      facebook: { followers: 1000, reach: 50 },
+      tiktok: { followers: 4 },
+      pinterest: { followers: 0 },
+    } }),
+  });
+  check('a snapshot is accepted', one.status === 200, one.status);
+
+  const bad1 = await api('/api/analytics/snapshot', {
+    method: 'POST',
+    body: JSON.stringify({ date: D1, platforms: { myspace: { followers: 1 } } }),
+  });
+  check('an unknown platform is refused', bad1.status === 400, bad1.status);
+
+  // A second post naming only one platform must not blank the other.
+  await api('/api/analytics/snapshot', {
+    method: 'POST',
+    body: JSON.stringify({ date: D1, source: 'test',
+                           platforms: { instagram: { followers: 0 } } }),
+  });
+  const merged = await (await api(`/api/analytics/snapshots/${D1}`)).json();
+  check('a partial snapshot merges rather than replacing',
+    merged.platforms.facebook?.followers === 1000 &&
+    merged.platforms.instagram?.followers === 0, Object.keys(merged.platforms));
+
+  await api('/api/analytics/snapshot', {
+    method: 'POST',
+    body: JSON.stringify({ date: D2, source: 'test', platforms: {
+      facebook: { followers: 1120 },
+      tiktok: { followers: 9 },
+      instagram: { followers: 3 },
+    } }),
+  });
+
+  const a = await (await api(`/api/analytics/snapshots/${D1}`)).json();
+  const b = await (await api(`/api/analytics/snapshots/${D2}`)).json();
+
+  const t = totalAcross(b, 'followers');
+  check('a total sums only what was measured', t.value === 1132, t);
+  check('and names the platforms it could not include',
+    t.missing.includes('youtube') && t.missing.includes('pinterest'), t.missing);
+
+  const d = delta(a, b, 'followers');
+  check('a delta is computed per platform', d.platforms.facebook === 120, d.platforms);
+  check('a platform missing at one end is null, not zero',
+    d.platforms.youtube === null, d.platforms.youtube);
+  check('the total delta counts only comparable platforms',
+    d.total === 128, d.total);
+
+  check('percentage change from zero is null, not infinity',
+    pctChange(0, 50) === null, pctChange(0, 50));
+  check('percentage change from an unknown base is null',
+    pctChange(null, 50) === null, pctChange(null, 50));
+
+  const cov = await (await api('/api/analytics/coverage')).json();
+  check('coverage counts the days held', cov.days === 2, cov.days);
+
+  // --- the Command Centre ---------------------------------------------------
+  const cc = await (await api('/api/command')).json();
+  check('the command centre answers', cc.overview !== undefined, Object.keys(cc));
+  check('its overview knows how much history it has',
+    cc.overview.coverage?.days === 2, cc.overview.coverage);
+
+  const g = await (await api('/api/command/growth?days=30')).json();
+  check('growth reports the span it actually had, not the one asked for',
+    g.spanDays === 7, g.spanDays);
+  check('and says the window is incomplete', g.complete === false, g.complete);
+
+  // The failure this guards against: answering a 30-day question with two rows
+  // from January and calling it flat.
+  const old = await (await api('/api/command/growth?days=2')).json();
+  check('a window with fewer than two snapshots refuses to answer',
+    old.available === false, old);
+
+  check('a forecast refuses on two days of data',
+    cc.forecast.available === false, cc.forecast);
+  check('and says how much more it needs',
+    typeof cc.forecast.short === 'number', cc.forecast);
+
+  const card = cc.scorecards.find((c) => c.platform === 'youtube');
+  check('a platform with no data is marked so, not shown as zero',
+    card.connected === false && card.followers === null, card);
+
+  const fb = cc.scorecards.find((c) => c.platform === 'facebook');
+  check('a platform with too little history gets no verdict',
+    fb.status === 'TOO EARLY', fb.status);
+
+  const health = await (await api('/api/command/health')).json();
+  const ytHealth = health.sources.find((s) => s.platform === 'youtube');
+  check('data health reports a never-collected platform',
+    ytHealth.state === 'NO DATA', ytHealth);
+  const fbHealth = health.sources.find((s) => s.platform === 'facebook');
+  check('a platform collected today reads as connected',
+    fbHealth.state === 'CONNECTED', fbHealth);
+
+  // Pinterest was captured a week ago and not since. The figure still exists,
+  // and the one thing that must never happen is showing it as today's.
+  const pinHealth = health.sources.find((s) => s.platform === 'pinterest');
+  check('a stale platform is flagged, not silently shown as current',
+    pinHealth.state === 'WARNING' && pinHealth.ageDays === 7, pinHealth);
+  check('and the note says so in words',
+    /not being shown as current/.test(pinHealth.note || ''), pinHealth.note);
+}
+
 server.close();
 rmSync(DATA, { recursive: true, force: true });
 console.log(failures ? `\n${failures} FAILED\n` : '\nall passed\n');

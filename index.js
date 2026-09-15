@@ -14,6 +14,11 @@ import { timingSafeEqual } from 'node:crypto';
 
 import { config, cardsDir, reelsDir, ensureDirs, configProblems } from './config.js';
 import { prune, usage } from './prune.js';
+import { writeSnapshot, readSnapshot, listSnapshots, snapshotRange,
+         coverage as analyticsCoverage, PLATFORMS, METRICS } from './analytics.js';
+import { commandCentre, overview as ccOverview, growth as ccGrowth,
+         scorecards as ccScorecards, forecast as ccForecast,
+         dataHealth as ccDataHealth } from './command.js';
 import { zonedToUtc, todayIn, isDateString } from './time.js';
 import { readDay, writeDay, listDays, updatePost, deleteDay } from './store.js';
 import { scheduleFacebook, publishInstagram, publishFacebookNow, verifyFacebook,
@@ -435,6 +440,59 @@ async function route(req, res, url) {
   if (req.method === 'POST' && url.pathname === '/api/prune') {
     const dryRun = url.searchParams.get('dryRun') === '1';
     return send(res, 200, prune({ dryRun }));
+  }
+
+  // --- analytics -------------------------------------------------------
+  //
+  // The collector posts here once a night. Facebook and Instagram this service
+  // can read itself; Pinterest, TikTok, Threads and YouTube come through
+  // Metricool, which is only reachable over MCP — so a scheduled task gathers
+  // those and hands them over.
+  if (req.method === 'POST' && url.pathname === '/api/analytics/snapshot') {
+    const body = await readBody(req);
+    const date = body.date || todayIn(config.timezone);
+    if (!isDateString(date)) bad('date must be yyyy-mm-dd');
+    if (!body.platforms || typeof body.platforms !== 'object') {
+      bad('platforms must be an object keyed by platform name');
+    }
+    const unknown = Object.keys(body.platforms)
+      .filter((k) => !PLATFORMS.includes(k));
+    if (unknown.length) bad(`unknown platform(s): ${unknown.join(', ')}`);
+
+    const written = writeSnapshot(date, body.platforms, { source: body.source });
+    return send(res, 200, { snapshot: written, platforms: PLATFORMS, metrics: METRICS });
+  }
+
+  if (req.method === 'GET' && url.pathname === '/api/analytics/snapshots') {
+    const to = url.searchParams.get('to') || todayIn(config.timezone);
+    const from = url.searchParams.get('from') || '0000-00-00';
+    return send(res, 200, { from, to, snapshots: snapshotRange(from, to) });
+  }
+
+  if (req.method === 'GET' && seg[0] === 'api' && seg[1] === 'analytics' &&
+      seg[2] === 'snapshots' && seg.length === 4) {
+    const snap = readSnapshot(seg[3]);
+    return snap ? send(res, 200, snap)
+                : send(res, 404, { error: 'no snapshot for that date' });
+  }
+
+  if (req.method === 'GET' && url.pathname === '/api/analytics/coverage') {
+    return send(res, 200, analyticsCoverage());
+  }
+
+  // The whole Command Centre in one object. The dashboard reads this; so can a
+  // scheduled task writing the morning brief.
+  if (req.method === 'GET' && url.pathname === '/api/command') {
+    return send(res, 200, commandCentre());
+  }
+
+  if (req.method === 'GET' && url.pathname === '/api/command/growth') {
+    const days = Math.min(3650, Math.max(1, Number(url.searchParams.get('days')) || 30));
+    return send(res, 200, ccGrowth(days));
+  }
+
+  if (req.method === 'GET' && url.pathname === '/api/command/health') {
+    return send(res, 200, ccDataHealth());
   }
 
   // The watchman. One object, no secrets, safe to paste anywhere: is today

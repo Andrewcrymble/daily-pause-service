@@ -147,6 +147,41 @@ const PAGE = `<!doctype html>
       font-family:var(--mono);font-size:12.5px;line-height:1.65;overflow-x:auto;margin:0;
       white-space:pre-wrap;word-break:break-word}
 
+  /* ---------------------------------------------------- command centre */
+
+  /* Every figure on this tab carries what kind of thing it is. A measured
+     follower count and a projected one in the same typeface is a lie told by
+     layout, so the kind is part of the component rather than a footnote. */
+  .kind{font-size:10px;letter-spacing:.1em;text-transform:uppercase;font-weight:600;
+        color:var(--faint);border:1px solid var(--rule);border-radius:2px;
+        padding:1px 5px;margin-left:7px;vertical-align:2px;white-space:nowrap}
+  .kind.est{color:var(--warn);border-color:var(--warn)}
+  .kind.calc{color:var(--accent);border-color:var(--accent)}
+
+  .headline{background:var(--raised);border:1px solid var(--rule);border-radius:4px;
+            padding:20px 22px;margin-bottom:22px}
+  .headline .q{font-family:var(--display);font-size:clamp(20px,3vw,26px);line-height:1.3;
+               margin:0 0 6px}
+  .headline .a{color:var(--muted);font-size:14.5px;margin:0}
+
+  .delta{font-size:13px;font-weight:600;white-space:nowrap}
+  .delta.up{color:var(--good)} .delta.down{color:var(--bad)} .delta.flat{color:var(--faint)}
+
+  .nodata{color:var(--faint);font-style:italic}
+
+  .plat{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:12px}
+  .plat .card{margin:0}
+  .plat .name{font-family:var(--display);font-size:18px}
+  .plat .big{font-family:var(--display);font-size:30px;line-height:1.1;margin:8px 0 2px}
+  .plat .rows{margin-top:10px;padding-top:10px;border-top:1px solid var(--rule);font-size:13.5px}
+  .plat .rows div{display:flex;justify-content:space-between;gap:10px;padding:2px 0}
+  .plat .rows span:last-child{font-variant-numeric:tabular-nums}
+
+  .bar{height:6px;background:var(--sunk);border-radius:3px;overflow:hidden;margin-top:8px}
+  .bar i{display:block;height:100%;background:var(--accent)}
+
+  .spark{display:block;width:100%;height:64px}
+
   /* ----------------------------------------------------------- composer */
   .compose{display:grid;grid-template-columns:300px 1fr;gap:20px;align-items:start;
            background:var(--raised);border:1px solid var(--rule);border-radius:4px;
@@ -202,6 +237,7 @@ const PAGE = `<!doctype html>
 
   <nav class="tabs" role="tablist">
     <button role="tab" data-tab="today" aria-selected="true">Today</button>
+    <button role="tab" data-tab="command" aria-selected="false">Command centre</button>
     <button role="tab" data-tab="compose" aria-selected="false">Write a day</button>
     <button role="tab" data-tab="stats" aria-selected="false">Stats</button>
     <button role="tab" data-tab="log" aria-selected="false">Service</button>
@@ -209,6 +245,7 @@ const PAGE = `<!doctype html>
 
   <div id="health"></div>
   <div id="panel-today" class="panel"></div>
+  <div id="panel-command" class="panel hidden"></div>
   <div id="panel-compose" class="panel hidden"></div>
   <div id="panel-stats" class="panel hidden"></div>
   <div id="panel-log" class="panel hidden"></div>
@@ -1032,16 +1069,269 @@ function renderLog() {
   });
 }
 
+
+/* ========================================================= command centre */
+
+/*
+ * The four questions, in order, at the top of the page: are we growing, what
+ * is causing it, what is not working, what should we do next. Everything below
+ * them is the evidence.
+ *
+ * The hard rule here is that a number nobody measured is never drawn. A
+ * platform that does not report watch time shows a dash and the word
+ * unreported; it does not show a zero, because a zero is a measurement and
+ * would make that platform look like the worst performer rather than one that
+ * does not answer the question.
+ */
+
+/* Platforms are proper nouns and capitalise() gets two of the six wrong. */
+var PLATFORM_NAME = { facebook: 'Facebook', instagram: 'Instagram', tiktok: 'TikTok',
+                      youtube: 'YouTube', pinterest: 'Pinterest', threads: 'Threads' };
+function platName(p) { return PLATFORM_NAME[p] || p; }
+
+function nf(n) {
+  if (n === null || n === undefined) return null;
+  return Number(n).toLocaleString('en-GB', { maximumFractionDigits: 1 });
+}
+
+function num(n, dash) {
+  var v = nf(n);
+  return v === null ? '<span class="nodata">' + (dash || 'not reported') + '</span>' : esc(v);
+}
+
+function signed(n) {
+  if (n === null || n === undefined) return '<span class="nodata">—</span>';
+  var cls = n > 0 ? 'up' : n < 0 ? 'down' : 'flat';
+  var sign = n > 0 ? '↑ ' : n < 0 ? '↓ ' : '';
+  return '<span class="delta ' + cls + '">' + sign + nf(Math.abs(n)) + '</span>';
+}
+
+function pct(n) {
+  if (n === null || n === undefined) return '';
+  return ' <span class="quiet">' + (n > 0 ? '+' : '') + nf(n) + '%</span>';
+}
+
+function kind(k) {
+  var cls = k === 'estimate' ? ' est' : k === 'calculated' ? ' calc' : '';
+  return '<span class="kind' + cls + '">' + esc(k) + '</span>';
+}
+
+function loadCommand() {
+  return api('/api/command').then(function (d) { state.command = d; return d; });
+}
+
+function growthAnswer(c) {
+  var g = c.growth['30'] && c.growth['30'].available ? c.growth['30']
+        : c.growth['7'] && c.growth['7'].available ? c.growth['7'] : null;
+  if (!g) {
+    return { q: 'Not yet — there is not enough history to say.',
+             a: 'Growth needs two snapshots inside a window. The nightly collector ' +
+                'has run ' + (c.overview.coverage ? c.overview.coverage.days : 0) +
+                ' time(s). Ask again in a few days.' };
+  }
+  var word = g.net > 0 ? 'Yes.' : g.net < 0 ? 'No — the audience is shrinking.' : 'No — it is flat.';
+  var a = nf(g.net) + ' followers over ' + g.spanDays + ' day(s), across ' +
+          g.comparablePlatforms.length + ' platform(s) with data at both ends.';
+  if (!g.complete) {
+    a += ' This is the whole history so far, not a full ' + g.window + ' days.';
+  }
+  return { q: word, a: a };
+}
+
+function renderCommand() {
+  var p = $('panel-command');
+  var c = state.command;
+  if (!c) { p.innerHTML = '<p class="quiet">Reading…</p>'; return; }
+
+  var html = '';
+
+  /* --- are we growing ---------------------------------------------------- */
+  var ans = growthAnswer(c);
+  html += '<div class="headline"><p class="q">' + esc(ans.q) + '</p>' +
+          '<p class="a">' + esc(ans.a) + '</p></div>';
+
+  var ov = c.overview;
+  if (!ov.available) {
+    html += '<div class="banner warn"><strong>No snapshots yet.</strong>' +
+            '<span class="quiet">' + esc(ov.reason) + '</span></div>';
+    p.innerHTML = html;
+    return;
+  }
+
+  /* --- the top line ------------------------------------------------------ */
+  var wc = ov.followers.windowsComplete;
+  html += '<section><div class="sechead"><h2>Overview</h2>' +
+          '<span class="when">as at ' + esc(ov.asOf) + ' · ' +
+          ov.coverage.days + ' day(s) of history</span></div><div class="grid">';
+
+  html += '<div class="tile"><div class="k">Total followers</div>' +
+          '<div class="v">' + num(ov.followers.total) + '</div>' +
+          '<div class="n">' + (ov.totals.followers.missing.length
+            ? esc(ov.totals.followers.from.length) + ' of 6 platforms counted'
+            : 'all six platforms') + '</div></div>';
+
+  html += '<div class="tile"><div class="k">Gained this week</div>' +
+          '<div class="v">' + signed(ov.followers.week) + '</div>' +
+          '<div class="n">' + (wc.week ? 'full 7 days' : 'partial window') + '</div></div>';
+
+  html += '<div class="tile"><div class="k">Gained this month</div>' +
+          '<div class="v">' + signed(ov.followers.month) +
+          pct(ov.followers.monthPercent) + '</div>' +
+          '<div class="n">' + (wc.month ? 'full 30 days' : 'partial window') + '</div></div>';
+
+  html += '<div class="tile"><div class="k">Posts this week</div>' +
+          '<div class="v">' + esc(ov.posts.week) + '</div>' +
+          '<div class="n">' + esc(ov.posts.today) + ' today</div></div>';
+
+  html += '<div class="tile"><div class="k">Total reach</div>' +
+          '<div class="v">' + num(ov.totals.reach.value) + '</div>' +
+          '<div class="n">' + (ov.totals.reach.from.length
+            ? esc(ov.totals.reach.from.join(', ')) : 'no platform reported reach') +
+          '</div></div>';
+
+  html += '<div class="tile"><div class="k">Biggest platform</div>' +
+          '<div class="v">' +
+          (ov.biggestPlatform ? esc(platName(ov.biggestPlatform.platform)) : '<span class="nodata">—</span>') +
+          '</div><div class="n">' +
+          (ov.biggestPlatform ? nf(ov.biggestPlatform.value) + ' followers' : '') +
+          '</div></div>';
+
+  html += '<div class="tile"><div class="k">Fastest growing</div>' +
+          '<div class="v">' +
+          (ov.fastestGrowing ? esc(platName(ov.fastestGrowing.platform)) : '<span class="nodata">not yet</span>') +
+          '</div><div class="n">' +
+          (ov.fastestGrowing ? signed(ov.fastestGrowing.value) + ' in the window' :
+           'needs a full window on two platforms') + '</div></div>';
+
+  html += '</div></section>';
+
+  /* --- platform scorecards ---------------------------------------------- */
+  html += '<section><div class="sechead"><h2>Platforms</h2>' +
+          '<span class="when">status is our own judgement, not a platform metric</span>' +
+          '</div><div class="plat">';
+
+  c.scorecards.forEach(function (s) {
+    var chip = s.status === 'GROWING' ? 'good'
+             : s.status === 'DECLINING' ? 'bad'
+             : s.status === 'FLAT' ? 'warn' : '';
+    html += '<div class="card">' +
+      '<div style="display:flex;justify-content:space-between;align-items:baseline;gap:8px">' +
+      '<span class="name">' + esc(platName(s.platform)) + '</span>' +
+      '<span class="chip ' + chip + '">' + esc(s.status) + '</span></div>' +
+      '<div class="big">' + num(s.followers, 'no data') + '</div>' +
+      '<div class="quiet">' + esc(s.because) + '</div>';
+
+    if (s.connected) {
+      html += '<div class="rows">' +
+        '<div><span>30-day change</span><span>' + signed(s.gained) + '</span></div>' +
+        '<div><span>Reach</span><span>' + num(s.reach, 'unreported') + '</span></div>' +
+        '<div><span>Engagement</span><span>' + num(s.engagement, 'unreported') + '</span></div>' +
+        '<div><span>Video views</span><span>' + num(s.videoViews, 'unreported') + '</span></div>' +
+        '</div>';
+
+      if (s.milestone) {
+        var m = s.milestone;
+        var doneFrac = m.target ? Math.max(0, Math.min(1, (m.target - m.remaining) / m.target)) : 0;
+        html += '<div class="rows"><div><span>Next milestone</span><span>' +
+          nf(m.target - m.remaining) + ' / ' + nf(m.target) + '</span></div></div>' +
+          '<div class="bar"><i style="width:' + (doneFrac * 100).toFixed(1) + '%"></i></div>' +
+          '<div class="quiet" style="margin-top:6px">' + nf(m.remaining) + ' to go' +
+          (m.estimatedDays !== null
+            ? ' · about ' + nf(m.estimatedDays) + ' days at the current rate ' + kind('estimate')
+            : ' · no date while growth is flat') +
+          '</div>';
+      }
+    }
+    html += '</div>';
+  });
+  html += '</div></section>';
+
+  /* --- forecast ---------------------------------------------------------- */
+  var f = c.forecast;
+  html += '<section><div class="sechead"><h2>Forecast ' + kind('estimate') + '</h2></div>';
+  if (!f.available) {
+    html += '<div class="banner warn"><strong>More data required.</strong>' +
+            '<span class="quiet">' + esc(f.reason) +
+            (f.have !== undefined ? ' Currently holding ' + esc(f.have) + ' of ' +
+             esc(f.need) + ' days.' : '') + '</span></div>';
+  } else {
+    html += '<p class="quiet">' + esc(f.method) + ', on ' + esc(f.basedOnDays) +
+            ' days. These are projections, not measurements.</p><div class="grid">';
+    [30, 90, 180].forEach(function (h) {
+      var v = f.horizons[h];
+      html += '<div class="tile"><div class="k">In ' + h + ' days</div>' +
+              '<div class="v">' + nf(v.expected) + '</div>' +
+              '<div class="n">likely ' + nf(v.low) + ' – ' + nf(v.high) + '</div></div>';
+    });
+    html += '</div>';
+  }
+  html += '</section>';
+
+  /* --- what the analysis is still waiting for ---------------------------- */
+  var h = c.dataHealth;
+  html += '<section><div class="sechead"><h2>What is not ready yet</h2>' +
+          '<span class="when">each needs a minimum of history before it will speak</span>' +
+          '</div><div class="scroll"><table><thead><tr>' +
+          '<th>Analysis</th><th class="num">Days held</th><th class="num">Needed</th>' +
+          '<th>State</th></tr></thead><tbody>';
+  var labels = { growth: 'Are we growing', comparison: 'Platform comparison',
+                 timing: 'Best posting times', themes: 'Theme performance',
+                 forecast: 'Growth forecast', experiment: 'Experiments' };
+  Object.keys(h.readiness).forEach(function (k) {
+    var r = h.readiness[k];
+    html += '<tr><td>' + esc(labels[k] || k) + '</td>' +
+            '<td class="num">' + esc(r.have) + '</td>' +
+            '<td class="num">' + esc(r.need) + '</td>' +
+            '<td>' + (r.ok ? '<span class="chip good">READY</span>'
+                           : '<span class="chip">' + esc(r.short) + ' more days</span>') +
+            '</td></tr>';
+  });
+  html += '</tbody></table></div></section>';
+
+  /* --- data health ------------------------------------------------------- */
+  html += '<section><div class="sechead"><h2>Data health</h2>' +
+          '<span class="when">a stale figure is never shown as current</span>' +
+          '</div><div class="scroll"><table><thead><tr>' +
+          '<th>Platform</th><th>State</th><th>Source</th><th>Last collected</th>' +
+          '<th>Note</th></tr></thead><tbody>';
+  h.sources.forEach(function (sc) {
+    var chip = sc.state === 'CONNECTED' ? 'good'
+             : sc.state === 'STALE' ? 'warn'
+             : sc.state === 'WARNING' ? 'bad' : '';
+    html += '<tr><td>' + esc(platName(sc.platform)) + '</td>' +
+            '<td><span class="chip ' + chip + '">' + esc(sc.state) + '</span></td>' +
+            '<td class="quiet">' + (sc.source ? esc(sc.source) : '—') + '</td>' +
+            '<td class="quiet">' + (sc.lastSnapshot ? esc(sc.lastSnapshot) : 'never') + '</td>' +
+            '<td class="quiet">' + (sc.note ? esc(sc.note) : '') + '</td></tr>';
+  });
+  html += '</tbody></table></div>' +
+          '<p class="quiet" style="margin-top:10px">Facebook and Instagram are read from ' +
+          'the Meta Graph API by this service. Pinterest, TikTok, Threads and YouTube come ' +
+          'through Metricool, gathered by the nightly collector. Post counts come from this ' +
+          'service\\'s own publishing records.</p></section>';
+
+  p.innerHTML = html;
+}
+
 /* =================================================================== tabs */
 
 function showTab(name) {
   state.tab = name;
-  ['today', 'compose', 'stats', 'log'].forEach(function (t) {
+  ['today', 'command', 'compose', 'stats', 'log'].forEach(function (t) {
     $('panel-' + t).classList.toggle('hidden', t !== name);
   });
   document.querySelectorAll('nav.tabs button').forEach(function (b) {
     b.setAttribute('aria-selected', String(b.dataset.tab === name));
   });
+  if (name === 'command') {
+    renderCommand();
+    if (!state.command) {
+      loadCommand().then(renderCommand).catch(function (e) {
+        $('panel-command').innerHTML = '<div class="banner bad"><strong>Could not read the ' +
+          'command centre.</strong><span class="quiet">' + esc(e.message) + '</span></div>';
+      });
+    }
+  }
   if (name === 'compose') renderCompose();
   if (name === 'stats' && !state.stats) {
     renderStats();
