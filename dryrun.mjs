@@ -520,6 +520,86 @@ console.log('\nreels');
   check('a path traversal is refused', traversal.status >= 400, traversal.status);
 }
 
+// --- housekeeping: deleting a day, and pruning the volume -------------------
+{
+  console.log('\n# housekeeping');
+
+  const { usage } = await import('../src/prune.js');
+  const { cardsDir, reelsDir } = await import('../src/config.js');
+  const { writeFileSync: write, existsSync: has, utimesSync } = await import('node:fs');
+
+  const before = usage();
+  check('the volume is reported', typeof before.bytes === 'number', before);
+  check('with the retention it is set to keep',
+    before.keepCardDays > 0 && before.keepReelDays > 0, before);
+
+  const statusBody = await (await api('/api/status')).json();
+  check('and appears in /api/status', typeof statusBody.volume?.bytes === 'number',
+    statusBody.volume);
+
+  // A day nobody published: the case this is actually for.
+  const TEST_DAY = dateOffset(200);
+  const made = await api('/api/days', {
+    method: 'POST',
+    body: JSON.stringify({
+      date: TEST_DAY,
+      posts: [{ slot: '2100', topic: 'housekeeping', caption: 'x',
+                text: 'x', imageBase64: b64('2100.jpg'), hold: true,
+                holdReason: 'test' }],
+    }),
+  });
+  check('a held day is accepted', made.status === 200, made.status);
+
+  const cardName = (await (await api(`/api/days/${TEST_DAY}`)).json())
+    .posts[0].card.file;
+  check('and its card is on disk', has(join(cardsDir, cardName)), cardName);
+
+  const gone = await api(`/api/days/${TEST_DAY}`, { method: 'DELETE' });
+  const goneBody = await gone.json();
+  check('the day can be deleted', gone.status === 200, goneBody);
+  check('and its card goes with it', !has(join(cardsDir, cardName)), cardName);
+  check('a second delete is 404',
+    (await api(`/api/days/${TEST_DAY}`, { method: 'DELETE' })).status === 404);
+  check('a bad date is refused',
+    (await api('/api/days/not-a-date', { method: 'DELETE' })).status === 400);
+
+  // A day with a published post is the one thing this must not quietly erase.
+  const PUB = dateOffset(201);
+  writeDay({ date: PUB, timezone: 'Europe/London', posts: [
+    { slot: '0800', facebook: { status: 'published', postId: '1' } },
+  ] });
+  const refused = await api(`/api/days/${PUB}`, { method: 'DELETE' });
+  const refusedBody = await refused.json();
+  check('a day with a published post is refused', refused.status === 409, refusedBody);
+  check('and names the slot', refusedBody.slots?.[0] === '0800', refusedBody);
+  check('the record survives the refusal', readDay(PUB) !== null);
+  check('force deletes it',
+    (await api(`/api/days/${PUB}?force=1`, { method: 'DELETE' })).status === 200);
+
+  // Pruning: an old orphan goes, a file a recent record still names stays.
+  const orphan = join(reelsDir, '2020-01-01-2100.mp4');
+  write(orphan, Buffer.alloc(1024));
+  const old = (Date.now() - 400 * 86400_000) / 1000;
+  utimesSync(orphan, old, old);
+
+  const dry = await (await api('/api/prune?dryRun=1', { method: 'POST' })).json();
+  check('a dry prune finds the old reel', dry.reels.removed === 1, dry);
+  check('and does not remove it', has(orphan), orphan);
+
+  const real = await (await api('/api/prune', { method: 'POST' })).json();
+  check('a real prune removes it', real.reels.removed === 1, real);
+  check('and it is gone', !has(orphan), orphan);
+  check('and it reclaimed the bytes', real.bytes >= 1024, real.bytes);
+
+  // Tomorrow's reel is young, and named by a live record: doubly safe.
+  const live = join(reelsDir, `${TOMORROW}-2100.mp4`);
+  if (has(live)) {
+    utimesSync(live, old, old);         // age it past every retention
+    const again = await (await api('/api/prune', { method: 'POST' })).json();
+    check('a file a live record still names is not pruned', has(live), again);
+  }
+}
+
 server.close();
 rmSync(DATA, { recursive: true, force: true });
 console.log(failures ? `\n${failures} FAILED\n` : '\nall passed\n');

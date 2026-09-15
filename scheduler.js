@@ -11,6 +11,7 @@
 import { config } from './config.js';
 import { dueInstagramJobs, dueFacebookVerifications, updatePost, readDay } from './store.js';
 import { publishInstagram, verifyFacebook } from './publisher.js';
+import { prune } from './prune.js';
 import * as notify from './notify.js';
 
 const MAX_ATTEMPTS = 3;
@@ -24,6 +25,12 @@ const TOO_LATE_MS = 90 * 60_000;
 let timer = null;
 let running = false;
 export const log = [];
+
+// Housekeeping runs once a day, not on every tick. It is last in the tick on
+// purpose: publishing a post is the job, and sweeping the volume must never
+// delay or break it.
+const PRUNE_EVERY_MS = 24 * 60 * 60_000;
+let lastPrune = 0;
 
 /** Tell Andrew a post did not go out. Once, and never at the cost of a tick. */
 async function warn(date, slot, on, reason) {
@@ -92,6 +99,18 @@ export async function tick(now = Date.now()) {
         note({ event: r.skipped ? 'skipped' : 'published', date, slot, ...r });
       } catch (err) {
         note({ event: 'failed', date, slot, error: err.message });
+      }
+    }
+
+    // Last, and only once a day. prune() never throws, so this cannot take the
+    // tick with it; the worst it can do is report an error into the log.
+    if (now - lastPrune >= PRUNE_EVERY_MS) {
+      lastPrune = now;
+      const r = prune({ now });
+      if (r.error) note({ event: 'prune_error', error: r.error });
+      else if (r.cards.removed || r.reels.removed) {
+        note({ event: 'pruned', cards: r.cards.removed, reels: r.reels.removed,
+               bytes: r.bytes });
       }
     }
   } finally {

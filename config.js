@@ -46,6 +46,12 @@ export const config = {
   runpodEndpointId: process.env.RUNPOD_ENDPOINT_ID || '',
   runpodApiKey: process.env.RUNPOD_API_KEY || '',
 
+  // How long the volume keeps the heavy files. Day records are never pruned —
+  // they are the page's memory and cost kilobytes. See prune.js for the
+  // reasoning behind the two different numbers.
+  keepCardDays: int(process.env.KEEP_CARD_DAYS, 90),
+  keepReelDays: int(process.env.KEEP_REEL_DAYS, 30),
+
   // No Graph calls. Everything else runs for real.
   dryRun: bool(process.env.DRY_RUN),
 

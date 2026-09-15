@@ -8,13 +8,14 @@
  * No dependencies. Node 20+.
  */
 import { createServer } from 'node:http';
-import { writeFileSync, existsSync, readFileSync, statSync } from 'node:fs';
+import { writeFileSync, existsSync, readFileSync, statSync, unlinkSync } from 'node:fs';
 import { join, normalize } from 'node:path';
 import { timingSafeEqual } from 'node:crypto';
 
 import { config, cardsDir, reelsDir, ensureDirs, configProblems } from './config.js';
+import { prune, usage } from './prune.js';
 import { zonedToUtc, todayIn, isDateString } from './time.js';
-import { readDay, writeDay, listDays, updatePost } from './store.js';
+import { readDay, writeDay, listDays, updatePost, deleteDay } from './store.js';
 import { scheduleFacebook, publishInstagram, publishFacebookNow, verifyFacebook,
          cardUrl, cardFile, reelUrl, reelFile } from './publisher.js';
 import { check as dayCheck, pulse as dayPulse } from './check.js';
@@ -269,6 +270,9 @@ async function status() {
       configured: voice.configured(),
       endpoint: config.runpodEndpointId || null,
     },
+    // What the volume is holding, and what it is set to keep. Nothing used to
+    // report this, so nothing would have noticed it filling.
+    volume: usage(),
     problems: configProblems(),
     days: listDays().slice(-7),
     slots: Object.keys(config.slots),
@@ -380,6 +384,57 @@ async function route(req, res, url) {
     if (seg.length === 2) return send(res, 200, { days: listDays() });
     const day = readDay(seg[2]);
     return day ? send(res, 200, day) : send(res, 404, { error: 'no record for that date' });
+  }
+
+  // Remove a day record, and optionally the files it named.
+  //
+  // This exists for the debris of testing — a held day written to rehearse the
+  // pipeline, a date entered wrong — not for erasing history. A day with a post
+  // that actually published is refused: the record of what the page said is the
+  // one thing here that cannot be rebuilt.
+  if (req.method === 'DELETE' && seg[0] === 'api' && seg[1] === 'days' && seg.length === 3) {
+    const date = seg[2];
+    if (!isDateString(date)) bad('date must be yyyy-mm-dd');
+    const day = readDay(date);
+    if (!day) return send(res, 404, { error: 'no record for that date' });
+
+    const published = (day.posts || []).filter((p) =>
+      p.facebook?.status === 'published' || p.instagram?.status === 'published');
+    if (published.length && url.searchParams.get('force') !== '1') {
+      return send(res, 409, {
+        error: `${date} has ${published.length} published post(s); refusing to delete`,
+        slots: published.map((p) => p.slot),
+        hint: 'add ?force=1 only if you are certain',
+      });
+    }
+
+    // Take the filenames from the record before removing it, or nothing is
+    // left to say which files were this day's.
+    const files = [];
+    for (const post of day.posts || []) {
+      if (post.card?.file) files.push(join(cardsDir, post.card.file));
+      for (const f of Object.values(post.card?.formats || {})) {
+        if (f?.file) files.push(join(cardsDir, f.file));
+      }
+      if (post.reel?.file) files.push(join(reelsDir, post.reel.file));
+    }
+    let removedFiles = 0;
+    if (url.searchParams.get('keepFiles') !== '1') {
+      for (const path of new Set(files)) {
+        try {
+          if (existsSync(path)) { unlinkSync(path); removedFiles += 1; }
+        } catch { /* a file we cannot remove does not fail the delete */ }
+      }
+    }
+    deleteDay(date);
+    return send(res, 200, { deleted: date, posts: (day.posts || []).length, removedFiles });
+  }
+
+  // Housekeeping on demand. The scheduler does this daily; this is for seeing
+  // what it would do, and for not waiting until tomorrow.
+  if (req.method === 'POST' && url.pathname === '/api/prune') {
+    const dryRun = url.searchParams.get('dryRun') === '1';
+    return send(res, 200, prune({ dryRun }));
   }
 
   // The watchman. One object, no secrets, safe to paste anywhere: is today

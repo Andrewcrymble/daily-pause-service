@@ -5,7 +5,8 @@
  * editor is worth a great deal when something has gone wrong at six in the
  * morning.
  */
-import { readFileSync, writeFileSync, renameSync, readdirSync, existsSync } from 'node:fs';
+import { readFileSync, writeFileSync, renameSync, readdirSync, existsSync,
+         unlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { daysDir, ensureDirs } from './config.js';
 
@@ -36,6 +37,22 @@ export function listDays() {
     .filter((f) => f.endsWith('.json') && !f.endsWith('.tmp'))
     .map((f) => f.replace(/\.json$/, ''))
     .sort();
+}
+
+/**
+ * Remove a day record. Returns the record that was removed, or null if there
+ * was none.
+ *
+ * Deliberately says nothing about the cards and reels that day named — the
+ * caller decides, because "delete the test day I created an hour ago" and
+ * "forget last March" want different things from the files.
+ */
+export function deleteDay(date) {
+  const p = pathFor(date);
+  if (!existsSync(p)) return null;
+  const day = readDay(date);
+  unlinkSync(p);
+  return day;
 }
 
 /** Every Instagram job that is due and has not gone yet, oldest first. */
