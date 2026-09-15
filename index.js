@@ -420,6 +420,36 @@ async function route(req, res, url) {
     });
   }
 
+  // Speak a line and hand back the audio.
+  //
+  // This exists so that nothing else has to hold the RunPod key. The reel
+  // renderer already carries SERVICE_TOKEN; without this it would need the
+  // RunPod credentials too, which would put the same secret in a second place
+  // and make rotating it a two-job task instead of one.
+  if (req.method === 'POST' && url.pathname === '/api/voice/speak') {
+    if (!voice.configured()) {
+      return send(res, 400, { error: 'RUNPOD_ENDPOINT_ID and RUNPOD_API_KEY are not both set' });
+    }
+    const body = await readBody(req);
+    const line = String(body.text ?? '').trim();
+    if (!line) return send(res, 400, { error: 'no text to speak' });
+
+    // flac is roughly half the bytes of wav and every renderer reads it. The
+    // caller chooses, because the default should be the obvious one.
+    const format = body.format === 'flac' ? 'flac' : 'wav';
+    const r = await voice.speak(line, { format });
+    if (r.error) return send(res, 502, { error: r.error });
+
+    return send(res, 200, {
+      audio_b64: r.audio.toString('base64'),
+      format: r.format,
+      seconds: r.seconds,
+      sampleRate: r.sampleRate,
+      timing: r.timing,
+      settings: r.settings,
+    });
+  }
+
   // Is the endpoint reachable at all? Cheaper than /api/voice/test because it
   // does not wake a worker.
   if (req.method === 'GET' && url.pathname === '/api/voice/health') {
