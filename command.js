@@ -196,17 +196,40 @@ export function overview() {
 // --------------------------------------------------------------- scorecards
 
 /**
+ * The most recent snapshot that actually carries this platform, with its age.
+ *
+ * Reading only the newest snapshot was wrong: a platform the collector could
+ * not reach last night showed as NO DATA even though a perfectly good figure
+ * from the night before was sitting in the store. The fix is not to pretend
+ * yesterday's number is today's — it is to show it *and say how old it is*.
+ */
+function lastKnown(platform) {
+  const dates = listSnapshots();
+  for (let i = dates.length - 1; i >= 0; i -= 1) {
+    const snap = readSnapshot(dates[i]);
+    const row = snap?.platforms?.[platform];
+    if (row && row.followers !== null && row.followers !== undefined) {
+      return {
+        row,
+        date: dates[i],
+        ageDays: Math.round((Date.parse(iso(Date.now())) - Date.parse(dates[i])) / DAY),
+      };
+    }
+  }
+  return null;
+}
+
+/**
  * One card per platform. `status` is a judgement and is named as one — it is
  * not a platform metric and the dashboard labels it accordingly.
  */
 export function scorecards() {
-  const today = iso(Date.now());
-  const last = snapshotOnOrBefore(today);
   const month = growth(30);
   const out = [];
 
   for (const p of PLATFORMS) {
-    const row = last?.platforms?.[p] ?? null;
+    const known = lastKnown(p);
+    const row = known?.row ?? null;
     const g = month.available ? month.platforms[p] : null;
     const connected = Boolean(row) && row.followers !== null;
 
@@ -215,9 +238,9 @@ export function scorecards() {
 
     if (connected) {
       const g30 = g?.gained ?? null;
-      if (!month.available || !month.complete) {
+      if (!month.available || month.spanDays < 7) {
         status = 'TOO EARLY';
-        because = `Only ${month.available ? month.spanDays : 0} days of history; ` +
+        because = `Only ${month.available ? month.spanDays : 0} day(s) of history; ` +
                   'a verdict needs at least 7';
       } else if (g30 === null) {
         status = 'TOO EARLY';
@@ -237,6 +260,11 @@ export function scorecards() {
     out.push({
       platform: p,
       connected,
+      // Never presented as current when it is not. The dashboard shows the age
+      // beside the figure rather than quietly passing it off as today's.
+      asOf: known?.date ?? null,
+      ageDays: known?.ageDays ?? null,
+      stale: known ? known.ageDays > 1 : false,
       followers: row?.followers ?? null,
       gained: g?.gained ?? null,
       percent: g?.percent ?? null,

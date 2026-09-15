@@ -705,8 +705,18 @@ console.log('\nreels');
     card.connected === false && card.followers === null, card);
 
   const fb = cc.scorecards.find((c) => c.platform === 'facebook');
-  check('a platform with too little history gets no verdict',
-    fb.status === 'TOO EARLY', fb.status);
+  check('seven days of history is enough for a verdict',
+    fb.status === 'GROWING', fb.status);
+  check('and the card knows it is current', fb.stale === false, fb);
+
+  // Pinterest was captured a week ago and not since. The figure is real and
+  // worth showing — but never as today's.
+  const pin = cc.scorecards.find((c) => c.platform === 'pinterest');
+  check('a platform not collected lately still shows its last known figure',
+    pin.connected === true && pin.followers === 0, pin);
+  check('marked stale, with its age', pin.stale === true && pin.ageDays === 7, pin);
+  check('and given no verdict on an incomplete window',
+    pin.status === 'TOO EARLY', pin.status);
 
   const health = await (await api('/api/command/health')).json();
   const ytHealth = health.sources.find((s) => s.platform === 'youtube');

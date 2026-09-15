@@ -1219,7 +1219,11 @@ function renderCommand() {
       '<span class="name">' + esc(platName(s.platform)) + '</span>' +
       '<span class="chip ' + chip + '">' + esc(s.status) + '</span></div>' +
       '<div class="big">' + num(s.followers, 'no data') + '</div>' +
-      '<div class="quiet">' + esc(s.because) + '</div>';
+      '<div class="quiet">' + esc(s.because) + '</div>' +
+      (s.stale
+        ? '<div class="quiet" style="color:var(--warn);margin-top:4px">Last collected ' +
+          esc(s.asOf) + ' — ' + esc(s.ageDays) + ' days ago, not today</div>'
+        : '');
 
     if (s.connected) {
       html += '<div class="rows">' +
